@@ -45,7 +45,13 @@ export function validateQuery(schema: ZodType) {
       return;
     }
 
-    req.query = parsed.data as typeof req.query;
+    // Express 5 exposes req.query as a getter-only property.
+    Object.defineProperty(req, "query", {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: parsed.data,
+    });
     next();
   };
 }
