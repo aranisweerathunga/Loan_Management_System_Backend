@@ -71,3 +71,104 @@ model ProductVersion {
   @@index([loanProductId])
   @@index([loanProductId, status])
 }
+
+enum EpfBalanceSource {
+  MANUAL
+  IMPORT
+}
+
+model Borrower {
+  id              String               @id @default(uuid())
+  firstName       String
+  middleName      String?
+  lastName        String
+  dateOfBirth     DateTime?            @db.Date
+  email           String?
+  phone           String?
+  isActive        Boolean              @default(true)
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  identifiers     BorrowerIdentifier[]
+  employeeProfile EmployeeProfile?
+}
+
+model BorrowerIdentifier {
+  id         String   @id @default(uuid())
+  borrowerId String
+  type       String
+  value      String
+  isPrimary  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  borrower   Borrower @relation(fields: [borrowerId], references: [id], onDelete: Restrict)
+
+  @@unique([type, value])
+  @@index([borrowerId])
+}
+
+model EmployeeProfile {
+  id                String              @id @default(uuid())
+  borrowerId        String              @unique
+  isActive          Boolean             @default(true)
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  borrower          Borrower            @relation(fields: [borrowerId], references: [id], onDelete: Restrict)
+  employmentHistory EmploymentHistory[]
+  gradeHistory      GradeHistory[]
+  epfBalanceHistory EpfBalanceHistory[]
+}
+
+model EmploymentHistory {
+  id                String          @id @default(uuid())
+  employeeProfileId String
+  status            String
+  effectiveFrom     DateTime        @db.Date
+  effectiveTo       DateTime?       @db.Date
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  employeeProfile   EmployeeProfile @relation(fields: [employeeProfileId], references: [id], onDelete: Restrict)
+
+  @@index([employeeProfileId])
+  @@index([employeeProfileId, effectiveFrom])
+}
+
+model Grade {
+  id           String         @id @default(uuid())
+  code         String         @unique
+  name         String
+  description  String?
+  isActive     Boolean        @default(true)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  gradeHistory GradeHistory[]
+}
+
+model GradeHistory {
+  id                String          @id @default(uuid())
+  employeeProfileId String
+  gradeId           String
+  effectiveFrom     DateTime        @db.Date
+  effectiveTo       DateTime?       @db.Date
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  employeeProfile   EmployeeProfile @relation(fields: [employeeProfileId], references: [id], onDelete: Restrict)
+  grade             Grade           @relation(fields: [gradeId], references: [id], onDelete: Restrict)
+
+  @@index([employeeProfileId])
+  @@index([gradeId])
+  @@index([employeeProfileId, effectiveFrom])
+}
+
+model EpfBalanceHistory {
+  id                String           @id @default(uuid())
+  employeeProfileId String
+  balance           Decimal          @db.Decimal(18, 2)
+  asOfDate          DateTime         @db.Date
+  source            EpfBalanceSource
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  employeeProfile   EmployeeProfile  @relation(fields: [employeeProfileId], references: [id], onDelete: Restrict)
+
+  @@unique([employeeProfileId, asOfDate])
+  @@index([employeeProfileId])
+}

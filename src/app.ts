@@ -2,6 +2,8 @@ import cors from "cors";
 import express from "express";
 import helmet from "helmet";
 import { env } from "./config/env.js";
+import { borrowerRouter } from "./modules/borrowers/borrower.routes.js";
+import { gradeRouter } from "./modules/grades/grade.routes.js";
 import { healthRouter } from "./modules/health/health.routes.js";
 import { productRouter } from "./modules/products/product.routes.js";
 import { errorHandler } from "./shared/middleware/error-handler.js";
@@ -22,6 +24,8 @@ export function createApp() {
 
   app.use("/api", healthRouter);
   app.use("/api", productRouter);
+  app.use("/api", gradeRouter);
+  app.use("/api", borrowerRouter);
   app.use(notFoundHandler);
   app.use(errorHandler);
 
