@@ -1,7 +1,3 @@
-// Phase 0: connectivity only.
-// Domain models (products, borrowers, applications, facilities, etc.)
-// belong to later phases.
-
 generator client {
   provider = "prisma-client"
   output   = "../src/generated/prisma"
@@ -9,4 +5,69 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+}
+
+enum ProductVersionStatus {
+  DRAFT
+  ACTIVE
+  RETIRED
+}
+
+model ProductCategory {
+  id          String        @id @default(uuid())
+  code        String        @unique
+  name        String
+  description String?
+  isActive    Boolean       @default(true)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  products    LoanProduct[]
+}
+
+model LoanProduct {
+  id          String           @id @default(uuid())
+  categoryId  String
+  code        String           @unique
+  name        String
+  description String?
+  isActive    Boolean          @default(true)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  category    ProductCategory  @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  purposes    ProductPurpose[]
+  versions    ProductVersion[]
+
+  @@index([categoryId])
+}
+
+model ProductPurpose {
+  id            String      @id @default(uuid())
+  loanProductId String
+  code          String
+  name          String
+  description   String?
+  isActive      Boolean     @default(true)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  loanProduct   LoanProduct @relation(fields: [loanProductId], references: [id], onDelete: Restrict)
+
+  @@unique([loanProductId, code])
+  @@index([loanProductId])
+}
+
+model ProductVersion {
+  id            String               @id @default(uuid())
+  loanProductId String
+  versionNumber Int
+  status        ProductVersionStatus @default(DRAFT)
+  effectiveFrom DateTime             @db.Date
+  effectiveTo   DateTime?            @db.Date
+  configuration Json
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+  loanProduct   LoanProduct          @relation(fields: [loanProductId], references: [id], onDelete: Restrict)
+
+  @@unique([loanProductId, versionNumber])
+  @@index([loanProductId])
+  @@index([loanProductId, status])
 }
