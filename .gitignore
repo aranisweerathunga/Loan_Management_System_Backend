@@ -141,3 +141,15 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# TypeScript build output
+dist/
+
+# Prisma generated client
+generated/
+src/generated/
+
+# OS / editor artifacts
+.DS_Store
+Thumbs.db
+.idea/

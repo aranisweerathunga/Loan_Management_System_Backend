@@ -1,0 +1,12 @@
+// Phase 0: connectivity only.
+// Domain models (products, borrowers, applications, facilities, etc.)
+// belong to later phases.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
