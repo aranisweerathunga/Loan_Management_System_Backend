@@ -25,47 +25,51 @@ model ProductCategory {
 }
 
 model LoanProduct {
-  id          String           @id @default(uuid())
-  categoryId  String
-  code        String           @unique
-  name        String
-  description String?
-  isActive    Boolean          @default(true)
-  createdAt   DateTime         @default(now())
-  updatedAt   DateTime         @updatedAt
-  category    ProductCategory  @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-  purposes    ProductPurpose[]
-  versions    ProductVersion[]
+  id               String            @id @default(uuid())
+  categoryId       String
+  code             String            @unique
+  name             String
+  description      String?
+  isActive         Boolean           @default(true)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  category         ProductCategory   @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  purposes         ProductPurpose[]
+  versions         ProductVersion[]
+  loanApplications LoanApplication[]
 
   @@index([categoryId])
 }
 
 model ProductPurpose {
-  id            String      @id @default(uuid())
-  loanProductId String
-  code          String
-  name          String
-  description   String?
-  isActive      Boolean     @default(true)
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
-  loanProduct   LoanProduct @relation(fields: [loanProductId], references: [id], onDelete: Restrict)
+  id               String            @id @default(uuid())
+  loanProductId    String
+  code             String
+  name             String
+  description      String?
+  isActive         Boolean           @default(true)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  loanProduct      LoanProduct       @relation(fields: [loanProductId], references: [id], onDelete: Restrict)
+  loanApplications LoanApplication[]
 
   @@unique([loanProductId, code])
   @@index([loanProductId])
 }
 
 model ProductVersion {
-  id            String               @id @default(uuid())
-  loanProductId String
-  versionNumber Int
-  status        ProductVersionStatus @default(DRAFT)
-  effectiveFrom DateTime             @db.Date
-  effectiveTo   DateTime?            @db.Date
-  configuration Json
-  createdAt     DateTime             @default(now())
-  updatedAt     DateTime             @updatedAt
-  loanProduct   LoanProduct          @relation(fields: [loanProductId], references: [id], onDelete: Restrict)
+  id                     String                  @id @default(uuid())
+  loanProductId          String
+  versionNumber          Int
+  status                 ProductVersionStatus    @default(DRAFT)
+  effectiveFrom          DateTime                @db.Date
+  effectiveTo            DateTime?               @db.Date
+  configuration          Json
+  createdAt              DateTime                @default(now())
+  updatedAt              DateTime                @updatedAt
+  loanProduct            LoanProduct             @relation(fields: [loanProductId], references: [id], onDelete: Restrict)
+  loanApplications       LoanApplication[]
+  eligibilityAssessments EligibilityAssessment[]
 
   @@unique([loanProductId, versionNumber])
   @@index([loanProductId])
@@ -78,18 +82,19 @@ enum EpfBalanceSource {
 }
 
 model Borrower {
-  id              String               @id @default(uuid())
-  firstName       String
-  middleName      String?
-  lastName        String
-  dateOfBirth     DateTime?            @db.Date
-  email           String?
-  phone           String?
-  isActive        Boolean              @default(true)
-  createdAt       DateTime             @default(now())
-  updatedAt       DateTime             @updatedAt
-  identifiers     BorrowerIdentifier[]
-  employeeProfile EmployeeProfile?
+  id               String               @id @default(uuid())
+  firstName        String
+  middleName       String?
+  lastName         String
+  dateOfBirth      DateTime?            @db.Date
+  email            String?
+  phone            String?
+  isActive         Boolean              @default(true)
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+  identifiers      BorrowerIdentifier[]
+  employeeProfile  EmployeeProfile?
+  loanApplications LoanApplication[]
 }
 
 model BorrowerIdentifier {
@@ -171,4 +176,76 @@ model EpfBalanceHistory {
 
   @@unique([employeeProfileId, asOfDate])
   @@index([employeeProfileId])
+}
+
+enum LoanApplicationStatus {
+  DRAFT
+  SUBMITTED
+  UNDER_REVIEW
+}
+
+enum EligibilityAssessmentStatus {
+  PENDING
+  COMPLETED
+}
+
+model LoanApplicationNumberSequence {
+  calendarYear Int @id
+  lastValue    Int
+}
+
+model LoanApplication {
+  id                     String                     @id @default(uuid())
+  applicationNumber      String                     @unique
+  borrowerId             String
+  loanProductId          String
+  productVersionId       String
+  productPurposeId       String?
+  status                 LoanApplicationStatus      @default(DRAFT)
+  submittedAt            DateTime?
+  createdAt              DateTime                   @default(now())
+  updatedAt              DateTime                   @updatedAt
+  borrower               Borrower                   @relation(fields: [borrowerId], references: [id], onDelete: Restrict)
+  loanProduct            LoanProduct                @relation(fields: [loanProductId], references: [id], onDelete: Restrict)
+  productVersion         ProductVersion             @relation(fields: [productVersionId], references: [id], onDelete: Restrict)
+  productPurpose         ProductPurpose?            @relation(fields: [productPurposeId], references: [id], onDelete: Restrict)
+  statusHistory          ApplicationStatusHistory[]
+  eligibilityAssessments EligibilityAssessment[]
+
+  @@index([borrowerId])
+  @@index([status])
+  @@index([loanProductId])
+  @@index([productVersionId])
+  @@index([productPurposeId])
+}
+
+model ApplicationStatusHistory {
+  id                String                 @id @default(uuid())
+  loanApplicationId String
+  fromStatus        LoanApplicationStatus?
+  toStatus          LoanApplicationStatus
+  changedAt         DateTime               @default(now())
+  note              String?
+  loanApplication   LoanApplication        @relation(fields: [loanApplicationId], references: [id], onDelete: Restrict)
+
+  @@index([loanApplicationId])
+  @@index([loanApplicationId, changedAt])
+}
+
+model EligibilityAssessment {
+  id                String                      @id @default(uuid())
+  loanApplicationId String
+  productVersionId  String
+  status            EligibilityAssessmentStatus @default(PENDING)
+  inputSnapshot     Json
+  ruleSnapshot      Json
+  resultSnapshot    Json?
+  assessedAt        DateTime?
+  createdAt         DateTime                    @default(now())
+  updatedAt         DateTime                    @updatedAt
+  loanApplication   LoanApplication             @relation(fields: [loanApplicationId], references: [id], onDelete: Restrict)
+  productVersion    ProductVersion              @relation(fields: [productVersionId], references: [id], onDelete: Restrict)
+
+  @@index([loanApplicationId])
+  @@index([productVersionId])
 }

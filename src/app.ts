@@ -5,6 +5,7 @@ import { env } from "./config/env.js";
 import { borrowerRouter } from "./modules/borrowers/borrower.routes.js";
 import { gradeRouter } from "./modules/grades/grade.routes.js";
 import { healthRouter } from "./modules/health/health.routes.js";
+import { loanApplicationRouter } from "./modules/loan-applications/loan-application.routes.js";
 import { productRouter } from "./modules/products/product.routes.js";
 import { errorHandler } from "./shared/middleware/error-handler.js";
 import { notFoundHandler } from "./shared/middleware/not-found.js";
@@ -26,6 +27,7 @@ export function createApp() {
   app.use("/api", productRouter);
   app.use("/api", gradeRouter);
   app.use("/api", borrowerRouter);
+  app.use("/api", loanApplicationRouter);
   app.use(notFoundHandler);
   app.use(errorHandler);
 
