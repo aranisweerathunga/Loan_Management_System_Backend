@@ -407,3 +407,100 @@ export async function startReview(applicationId: string) {
 
   return serializeApplicationDetail(application);
 }
+
+/**
+ * Actor identity is not recorded. Authentication does not exist yet, so
+ * no-self-approval cannot be enforced. A later migration can add an
+ * authenticated actor reference on ApplicationDecision without changing
+ * the decision itself. Eligibility assessments are not consulted.
+ */
+async function recordTerminalDecision(
+  applicationId: string,
+  decision: "APPROVED" | "REJECTED",
+  remarks: string | null,
+) {
+  const action = decision === "APPROVED" ? "approved" : "rejected";
+
+  const application = await prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw<Array<{ id: string; status: string }>>`
+      SELECT "id", "status"::text AS "status"
+      FROM "LoanApplication"
+      WHERE "id" = ${applicationId}
+      FOR UPDATE
+    `;
+    const current = locked[0];
+    if (!current) {
+      throw new AppError(404, "Loan application not found", "NOT_FOUND");
+    }
+    if (current.status !== "UNDER_REVIEW") {
+      throw new AppError(
+        409,
+        `Only UNDER_REVIEW loan applications can be ${action}`,
+        "INVALID_STATE",
+      );
+    }
+
+    const decidedAt = new Date();
+
+    await tx.loanApplication.update({
+      where: { id: applicationId },
+      data: { status: decision },
+    });
+
+    await tx.applicationStatusHistory.create({
+      data: {
+        loanApplicationId: applicationId,
+        fromStatus: "UNDER_REVIEW",
+        toStatus: decision,
+        changedAt: decidedAt,
+      },
+    });
+
+    await tx.applicationDecision.create({
+      data: {
+        loanApplicationId: applicationId,
+        decision,
+        remarks,
+        decidedAt,
+      },
+    });
+
+    return tx.loanApplication.findUniqueOrThrow({
+      where: { id: applicationId },
+      include: applicationDetailInclude,
+    });
+  });
+
+  return serializeApplicationDetail(application);
+}
+
+export async function approveLoanApplication(applicationId: string, remarks?: string) {
+  return recordTerminalDecision(applicationId, "APPROVED", remarks ?? null);
+}
+
+export async function rejectLoanApplication(applicationId: string, remarks: string) {
+  return recordTerminalDecision(applicationId, "REJECTED", remarks);
+}
+
+/** Newest first: decidedAt descending, then id descending. */
+export async function listApplicationDecisions(applicationId: string) {
+  await getRequiredApplication(applicationId);
+
+  return prisma.applicationDecision.findMany({
+    where: { loanApplicationId: applicationId },
+    orderBy: [{ decidedAt: "desc" }, { id: "desc" }],
+  });
+}
+
+export async function getApplicationDecision(applicationId: string, decisionId: string) {
+  await getRequiredApplication(applicationId);
+
+  const decision = await prisma.applicationDecision.findFirst({
+    where: { id: decisionId, loanApplicationId: applicationId },
+  });
+  if (!decision) {
+    throw new AppError(404, "Application decision not found", "NOT_FOUND");
+  }
+
+  return decision;
+}

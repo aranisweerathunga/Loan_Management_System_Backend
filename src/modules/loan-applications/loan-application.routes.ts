@@ -5,8 +5,11 @@ import { validateBody, validateParams, validateQuery } from "../../shared/middle
 import * as loanApplicationController from "./loan-application.controller.js";
 import {
   applicationIdParamSchema,
+  approveLoanApplicationSchema,
   createLoanApplicationSchema,
+  decisionIdParamSchema,
   listLoanApplicationsQuerySchema,
+  rejectLoanApplicationSchema,
   updateDraftLoanApplicationSchema,
 } from "./loan-application.schemas.js";
 
@@ -47,6 +50,28 @@ loanApplicationRouter.post(
   "/loan-applications/:applicationId/start-review",
   validateParams(applicationIdParamSchema),
   loanApplicationController.startReview,
+);
+loanApplicationRouter.post(
+  "/loan-applications/:applicationId/approve",
+  validateParams(applicationIdParamSchema),
+  validateBody(approveLoanApplicationSchema),
+  loanApplicationController.approveLoanApplication,
+);
+loanApplicationRouter.post(
+  "/loan-applications/:applicationId/reject",
+  validateParams(applicationIdParamSchema),
+  validateBody(rejectLoanApplicationSchema),
+  loanApplicationController.rejectLoanApplication,
+);
+loanApplicationRouter.get(
+  "/loan-applications/:applicationId/decisions",
+  validateParams(applicationIdParamSchema),
+  loanApplicationController.listApplicationDecisions,
+);
+loanApplicationRouter.get(
+  "/loan-applications/:applicationId/decisions/:decisionId",
+  validateParams(decisionIdParamSchema),
+  loanApplicationController.getApplicationDecision,
 );
 loanApplicationRouter.post(
   "/loan-applications/:applicationId/eligibility-assessments",

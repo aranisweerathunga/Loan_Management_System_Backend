@@ -182,6 +182,13 @@ enum LoanApplicationStatus {
   DRAFT
   SUBMITTED
   UNDER_REVIEW
+  APPROVED
+  REJECTED
+}
+
+enum ApplicationDecisionType {
+  APPROVED
+  REJECTED
 }
 
 enum EligibilityAssessmentStatus {
@@ -211,6 +218,7 @@ model LoanApplication {
   productPurpose         ProductPurpose?            @relation(fields: [productPurposeId], references: [id], onDelete: Restrict)
   statusHistory          ApplicationStatusHistory[]
   eligibilityAssessments EligibilityAssessment[]
+  decisions              ApplicationDecision[]
 
   @@index([borrowerId])
   @@index([status])
@@ -248,4 +256,18 @@ model EligibilityAssessment {
 
   @@index([loanApplicationId])
   @@index([productVersionId])
+}
+
+/// Explicit approval or rejection. No actor is stored: authentication does not exist yet, so a trusted decided-by reference can be added later without changing this decision record.
+model ApplicationDecision {
+  id                String                  @id @default(uuid())
+  loanApplicationId String
+  decision          ApplicationDecisionType
+  remarks           String?
+  decidedAt         DateTime                @default(now())
+  createdAt         DateTime                @default(now())
+  loanApplication   LoanApplication         @relation(fields: [loanApplicationId], references: [id], onDelete: Restrict)
+
+  @@index([loanApplicationId])
+  @@index([loanApplicationId, decidedAt])
 }
