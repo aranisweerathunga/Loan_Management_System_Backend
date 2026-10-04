@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { positiveMoneyString } from "../../shared/money/money-string.js";
 
 export const loanApplicationStatuses = [
   "DRAFT",
@@ -18,6 +19,7 @@ const decisionRemarksSchema = z
   .max(500, "remarks must be at most 500 characters");
 
 export const approveLoanApplicationSchema = z.strictObject({
+  authorizedPrincipalAmount: positiveMoneyString("authorizedPrincipalAmount"),
   remarks: decisionRemarksSchema.optional(),
 });
 

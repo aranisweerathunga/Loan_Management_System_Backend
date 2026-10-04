@@ -59,10 +59,9 @@ export async function startReview(req: Request, res: Response): Promise<void> {
 }
 
 export async function approveLoanApplication(req: Request, res: Response): Promise<void> {
-  const body = req.body as ApproveLoanApplicationInput;
   const application = await loanApplicationService.approveLoanApplication(
     req.params.applicationId as string,
-    body.remarks,
+    req.body as ApproveLoanApplicationInput,
   );
   res.status(200).json({ data: application });
 }

@@ -1,7 +1,9 @@
 import type { Prisma } from "../../generated/prisma/client.js";
 import { prisma } from "../../shared/database/prisma.js";
 import { AppError } from "../../shared/errors/app-error.js";
+import { Decimal, formatMoney, parsePositiveMoneyString } from "../../shared/money/decimal.js";
 import type {
+  ApproveLoanApplicationInput,
   CreateLoanApplicationInput,
   ListLoanApplicationsQuery,
   UpdateDraftLoanApplicationInput,
@@ -58,6 +60,13 @@ const applicationDetailInclude = {
     },
     orderBy: { createdAt: "asc" as const },
   },
+  facility: {
+    select: {
+      id: true,
+      facilityNumber: true,
+      status: true,
+    },
+  },
 };
 
 function serializeApplication<T extends Prisma.LoanApplicationGetPayload<{ include: typeof applicationListInclude }>>(
@@ -87,6 +96,35 @@ function serializeApplicationDetail(
   return {
     ...serializeApplication(application),
     eligibilityAssessments: application.eligibilityAssessments,
+    facility: application.facility
+      ? {
+          id: application.facility.id,
+          facilityNumber: application.facility.facilityNumber,
+          status: application.facility.status,
+        }
+      : null,
+  };
+}
+
+function serializeDecision(decision: {
+  id: string;
+  loanApplicationId: string;
+  decision: "APPROVED" | "REJECTED";
+  remarks: string | null;
+  authorizedPrincipalAmount: { toFixed: (digits: number) => string } | null;
+  decidedAt: Date;
+  createdAt: Date;
+}) {
+  return {
+    id: decision.id,
+    loanApplicationId: decision.loanApplicationId,
+    decision: decision.decision,
+    remarks: decision.remarks,
+    authorizedPrincipalAmount: decision.authorizedPrincipalAmount
+      ? formatMoney(decision.authorizedPrincipalAmount)
+      : null,
+    decidedAt: decision.decidedAt,
+    createdAt: decision.createdAt,
   };
 }
 
@@ -418,6 +456,7 @@ async function recordTerminalDecision(
   applicationId: string,
   decision: "APPROVED" | "REJECTED",
   remarks: string | null,
+  authorizedPrincipalAmount: Decimal | null,
 ) {
   const action = decision === "APPROVED" ? "approved" : "rejected";
 
@@ -437,6 +476,14 @@ async function recordTerminalDecision(
         409,
         `Only UNDER_REVIEW loan applications can be ${action}`,
         "INVALID_STATE",
+      );
+    }
+
+    if (decision === "APPROVED" && authorizedPrincipalAmount === null) {
+      throw new AppError(
+        500,
+        "Approved decisions require an authorized principal amount",
+        "INTERNAL_SERVER_ERROR",
       );
     }
 
@@ -461,6 +508,7 @@ async function recordTerminalDecision(
         loanApplicationId: applicationId,
         decision,
         remarks,
+        authorizedPrincipalAmount: decision === "APPROVED" ? authorizedPrincipalAmount : null,
         decidedAt,
       },
     });
@@ -474,22 +522,35 @@ async function recordTerminalDecision(
   return serializeApplicationDetail(application);
 }
 
-export async function approveLoanApplication(applicationId: string, remarks?: string) {
-  return recordTerminalDecision(applicationId, "APPROVED", remarks ?? null);
+export async function approveLoanApplication(
+  applicationId: string,
+  input: ApproveLoanApplicationInput,
+) {
+  const authorizedPrincipalAmount = parsePositiveMoneyString(
+    input.authorizedPrincipalAmount,
+    "authorizedPrincipalAmount",
+  );
+  return recordTerminalDecision(
+    applicationId,
+    "APPROVED",
+    input.remarks ?? null,
+    authorizedPrincipalAmount,
+  );
 }
 
 export async function rejectLoanApplication(applicationId: string, remarks: string) {
-  return recordTerminalDecision(applicationId, "REJECTED", remarks);
+  return recordTerminalDecision(applicationId, "REJECTED", remarks, null);
 }
 
 /** Newest first: decidedAt descending, then id descending. */
 export async function listApplicationDecisions(applicationId: string) {
   await getRequiredApplication(applicationId);
 
-  return prisma.applicationDecision.findMany({
+  const decisions = await prisma.applicationDecision.findMany({
     where: { loanApplicationId: applicationId },
     orderBy: [{ decidedAt: "desc" }, { id: "desc" }],
   });
+  return decisions.map(serializeDecision);
 }
 
 export async function getApplicationDecision(applicationId: string, decisionId: string) {
@@ -502,5 +563,5 @@ export async function getApplicationDecision(applicationId: string, decisionId: 
     throw new AppError(404, "Application decision not found", "NOT_FOUND");
   }
 
-  return decision;
+  return serializeDecision(decision);
 }

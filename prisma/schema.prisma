@@ -37,6 +37,7 @@ model LoanProduct {
   purposes         ProductPurpose[]
   versions         ProductVersion[]
   loanApplications LoanApplication[]
+  loanFacilities   LoanFacility[]
 
   @@index([categoryId])
 }
@@ -52,6 +53,7 @@ model ProductPurpose {
   updatedAt        DateTime          @updatedAt
   loanProduct      LoanProduct       @relation(fields: [loanProductId], references: [id], onDelete: Restrict)
   loanApplications LoanApplication[]
+  loanFacilities   LoanFacility[]
 
   @@unique([loanProductId, code])
   @@index([loanProductId])
@@ -70,6 +72,7 @@ model ProductVersion {
   loanProduct            LoanProduct             @relation(fields: [loanProductId], references: [id], onDelete: Restrict)
   loanApplications       LoanApplication[]
   eligibilityAssessments EligibilityAssessment[]
+  loanFacilities         LoanFacility[]
 
   @@unique([loanProductId, versionNumber])
   @@index([loanProductId])
@@ -95,6 +98,7 @@ model Borrower {
   identifiers      BorrowerIdentifier[]
   employeeProfile  EmployeeProfile?
   loanApplications LoanApplication[]
+  loanFacilities   LoanFacility[]
 }
 
 model BorrowerIdentifier {
@@ -219,6 +223,7 @@ model LoanApplication {
   statusHistory          ApplicationStatusHistory[]
   eligibilityAssessments EligibilityAssessment[]
   decisions              ApplicationDecision[]
+  facility               LoanFacility?
 
   @@index([borrowerId])
   @@index([status])
@@ -259,15 +264,93 @@ model EligibilityAssessment {
 }
 
 /// Explicit approval or rejection. No actor is stored: authentication does not exist yet, so a trusted decided-by reference can be added later without changing this decision record.
+/// authorizedPrincipalAmount is historical approval data. It is required for new APPROVED decisions and remains null for REJECTED decisions and for approvals recorded before the amount existed.
 model ApplicationDecision {
-  id                String                  @id @default(uuid())
-  loanApplicationId String
-  decision          ApplicationDecisionType
-  remarks           String?
-  decidedAt         DateTime                @default(now())
-  createdAt         DateTime                @default(now())
-  loanApplication   LoanApplication         @relation(fields: [loanApplicationId], references: [id], onDelete: Restrict)
+  id                        String                  @id @default(uuid())
+  loanApplicationId         String
+  decision                  ApplicationDecisionType
+  remarks                   String?
+  authorizedPrincipalAmount Decimal?                @db.Decimal(18, 2)
+  decidedAt                 DateTime                @default(now())
+  createdAt                 DateTime                @default(now())
+  loanApplication           LoanApplication         @relation(fields: [loanApplicationId], references: [id], onDelete: Restrict)
 
   @@index([loanApplicationId])
   @@index([loanApplicationId, decidedAt])
+}
+
+enum LoanFacilityStatus {
+  PENDING_DISBURSEMENT
+  ACTIVE
+}
+
+enum LoanTransactionType {
+  DISBURSEMENT
+}
+
+model LoanFacilityNumberSequence {
+  calendarYear Int @id
+  lastValue    Int
+}
+
+/// One facility per approved application. The authorized amount is copied from the approval decision and is not supplied by the caller.
+model LoanFacility {
+  id                        String             @id @default(uuid())
+  facilityNumber            String             @unique
+  loanApplicationId         String             @unique
+  borrowerId                String
+  loanProductId             String
+  productVersionId          String
+  productPurposeId          String?
+  authorizedPrincipalAmount Decimal            @db.Decimal(18, 2)
+  currencyCode              String             @db.VarChar(3)
+  facilityDate              DateTime           @db.Date
+  status                    LoanFacilityStatus @default(PENDING_DISBURSEMENT)
+  createdAt                 DateTime           @default(now())
+  updatedAt                 DateTime           @updatedAt
+  loanApplication           LoanApplication    @relation(fields: [loanApplicationId], references: [id], onDelete: Restrict)
+  borrower                  Borrower           @relation(fields: [borrowerId], references: [id], onDelete: Restrict)
+  loanProduct               LoanProduct        @relation(fields: [loanProductId], references: [id], onDelete: Restrict)
+  productVersion            ProductVersion     @relation(fields: [productVersionId], references: [id], onDelete: Restrict)
+  productPurpose            ProductPurpose?    @relation(fields: [productPurposeId], references: [id], onDelete: Restrict)
+  disbursements             LoanDisbursement[]
+  transactions              LoanTransaction[]
+
+  @@index([borrowerId])
+  @@index([loanProductId])
+  @@index([productVersionId])
+  @@index([productPurposeId])
+  @@index([status])
+}
+
+/// Actual release of funds against an existing facility authorization. Immutable: no update or delete API.
+model LoanDisbursement {
+  id               String          @id @default(uuid())
+  loanFacilityId   String
+  amount           Decimal         @db.Decimal(18, 2)
+  disbursementDate DateTime        @db.Date
+  reference        String?         @db.VarChar(120)
+  remarks          String?         @db.VarChar(500)
+  createdAt        DateTime        @default(now())
+  loanFacility     LoanFacility    @relation(fields: [loanFacilityId], references: [id], onDelete: Restrict)
+  loanTransaction  LoanTransaction?
+
+  @@index([loanFacilityId])
+  @@index([loanFacilityId, disbursementDate])
+}
+
+/// Append-only facility subledger. Phase 7A records DISBURSEMENT only. A disbursement transaction points at the LoanDisbursement that created it.
+model LoanTransaction {
+  id                 String              @id @default(uuid())
+  loanFacilityId     String
+  type               LoanTransactionType
+  principalAmount    Decimal             @db.Decimal(18, 2)
+  transactionDate    DateTime            @db.Date
+  loanDisbursementId String?             @unique
+  createdAt          DateTime            @default(now())
+  loanFacility       LoanFacility        @relation(fields: [loanFacilityId], references: [id], onDelete: Restrict)
+  loanDisbursement   LoanDisbursement?   @relation(fields: [loanDisbursementId], references: [id], onDelete: Restrict)
+
+  @@index([loanFacilityId])
+  @@index([loanFacilityId, transactionDate])
 }
