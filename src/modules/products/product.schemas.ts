@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { productVersionConfigurationSchema } from "../interest-repayment/configuration.js";
 
 const trimmedCode = z
   .string()
@@ -27,8 +28,6 @@ const isoDate = z
   .refine((value) => !Number.isNaN(Date.parse(`${value}T00:00:00Z`)), {
     message: "date must be a valid calendar date",
   });
-
-const configurationObject = z.record(z.string(), z.unknown());
 
 export const idParamSchema = z.object({
   categoryId: z.uuid().optional(),
@@ -120,7 +119,7 @@ export const createVersionSchema = z
     versionNumber: z.number().int().positive(),
     effectiveFrom: isoDate,
     effectiveTo: isoDate.nullable().optional(),
-    configuration: configurationObject,
+    configuration: productVersionConfigurationSchema,
   })
   .refine(
     (value) => !value.effectiveTo || value.effectiveTo >= value.effectiveFrom,
@@ -135,7 +134,7 @@ export const updateDraftVersionSchema = z
     versionNumber: z.number().int().positive().optional(),
     effectiveFrom: isoDate.optional(),
     effectiveTo: isoDate.nullable().optional(),
-    configuration: configurationObject.optional(),
+    configuration: productVersionConfigurationSchema.optional(),
   })
   .refine((value) => Object.keys(value).length > 0, {
     message: "at least one field is required",

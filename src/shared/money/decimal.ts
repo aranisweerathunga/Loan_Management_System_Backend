@@ -9,9 +9,19 @@ import { AppError } from "../errors/app-error.js";
  */
 export { Decimal };
 
-const DECIMAL_STRING = /^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/;
-
 /** PostgreSQL DECIMAL(18, 2): 16 digits before the decimal point and 2 after. */
+export const MONEY_DECIMAL_PLACES = 2;
+
+/**
+ * Deterministic monetary rounding for calculated outputs and formatted money.
+ * This is a system rule, not a ProductVersion setting.
+ */
+export const MONETARY_ROUNDING = Decimal.ROUND_HALF_UP;
+
+const DECIMAL_STRING = new RegExp(
+  `^(?:0|[1-9]\\d*)(?:\\.\\d{1,${MONEY_DECIMAL_PLACES}})?$`,
+);
+
 export const MAX_MONEY = new Decimal("9999999999999999.99");
 
 export const MONEY_DECIMAL_PATTERN = DECIMAL_STRING;
@@ -59,6 +69,46 @@ export function parsePositiveMoneyString(value: unknown, field = "amount"): Deci
   return amount;
 }
 
-export function formatMoney(value: Decimal | { toFixed: (digits: number) => string }): string {
-  return value.toFixed(2);
+export function roundMoney(value: Decimal): Decimal {
+  return value.toDecimalPlaces(MONEY_DECIMAL_PLACES, MONETARY_ROUNDING);
+}
+
+export function parseNonNegativeMoneyAmount(value: unknown, field: string): Decimal {
+  if (typeof value !== "string") {
+    const message =
+      typeof value === "number"
+        ? `${field} must be a decimal string, not a number`
+        : value === undefined
+          ? `${field} is required`
+          : `${field} must be a decimal string`;
+    throw new AppError(400, message, "VALIDATION_ERROR");
+  }
+
+  const normalized = value.trim();
+  if (normalized.startsWith("-")) {
+    throw new AppError(400, `${field} must not be negative`, "VALIDATION_ERROR");
+  }
+  if (!DECIMAL_STRING.test(normalized)) {
+    throw new AppError(
+      400,
+      `${field} must be a non-negative decimal string with up to ${MONEY_DECIMAL_PLACES} decimal places`,
+      "VALIDATION_ERROR",
+    );
+  }
+
+  const amount = new Decimal(normalized);
+  if (!amount.isFinite() || amount.isNeg()) {
+    throw new AppError(400, `${field} must not be negative`, "VALIDATION_ERROR");
+  }
+  if (amount.greaterThan(MAX_MONEY)) {
+    throw new AppError(400, `${field} exceeds the supported monetary precision`, "VALIDATION_ERROR");
+  }
+
+  return amount;
+}
+
+export function formatMoney(
+  value: Decimal | { toFixed: (digits: number, rounding?: number) => string },
+): string {
+  return value.toFixed(MONEY_DECIMAL_PLACES, MONETARY_ROUNDING);
 }

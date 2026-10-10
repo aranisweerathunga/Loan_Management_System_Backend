@@ -315,6 +315,8 @@ model LoanFacility {
   productPurpose            ProductPurpose?    @relation(fields: [productPurposeId], references: [id], onDelete: Restrict)
   disbursements             LoanDisbursement[]
   transactions              LoanTransaction[]
+  interestCalculations      InterestCalculation[]
+  repaymentSchedules        RepaymentSchedule[]
 
   @@index([borrowerId])
   @@index([loanProductId])
@@ -353,4 +355,87 @@ model LoanTransaction {
 
   @@index([loanFacilityId])
   @@index([loanFacilityId, transactionDate])
+}
+
+/// Append-only interest calculation snapshot. A later calculation inserts a new row.
+/// periodStart and periodEnd are stored only when a caller supplies already-resolved bounds.
+/// This model does not derive a calendar year, anniversary, or facility year, and it does not select an MSPS anchor.
+model InterestCalculation {
+  id                      String               @id @default(uuid())
+  loanFacilityId          String
+  calculationStrategy     String
+  principalAmount         Decimal              @db.Decimal(18, 2)
+  annualRate              Decimal              @db.Decimal(18, 4)
+  annualInterestAmount    Decimal              @db.Decimal(18, 2)
+  allocationFrequency     String
+  recalculationFrequency  String
+  periodStart             DateTime?            @db.Date
+  periodEnd               DateTime?            @db.Date
+  inputSnapshot           Json
+  policySnapshot          Json
+  resultSnapshot          Json
+  createdAt               DateTime             @default(now())
+  loanFacility            LoanFacility         @relation(fields: [loanFacilityId], references: [id], onDelete: Restrict)
+  allocations             InterestAllocation[]
+  repaymentSchedules      RepaymentSchedule[]
+
+  @@index([loanFacilityId])
+  @@index([loanFacilityId, createdAt])
+}
+
+/// Monthly interest amount from one InterestCalculation. This row has no due date.
+model InterestAllocation {
+  id                    String              @id @default(uuid())
+  interestCalculationId String
+  sequence              Int
+  interestAmount        Decimal             @db.Decimal(18, 2)
+  createdAt             DateTime            @default(now())
+  interestCalculation   InterestCalculation @relation(fields: [interestCalculationId], references: [id], onDelete: Restrict)
+
+  @@unique([interestCalculationId, sequence])
+  @@index([interestCalculationId])
+}
+
+/// Append-only repayment schedule snapshot. A later schedule inserts a new row.
+/// interestCalculationId is optional: a schedule may be assembled from supplied allocations that do not come from one stored calculation.
+/// due dates live on entries. This model does not derive them and does not select MSPS repayment policy.
+model RepaymentSchedule {
+  id                       String                   @id @default(uuid())
+  loanFacilityId           String
+  interestCalculationId    String?
+  principalAmount          Decimal                  @db.Decimal(18, 2)
+  totalScheduledPrincipal  Decimal                  @db.Decimal(18, 2)
+  totalScheduledInterest   Decimal                  @db.Decimal(18, 2)
+  totalScheduledAmount     Decimal                  @db.Decimal(18, 2)
+  remainingPrincipal       Decimal                  @db.Decimal(18, 2)
+  numberOfInstalments      Int
+  inputSnapshot            Json
+  policySnapshot           Json
+  resultSnapshot           Json
+  createdAt                DateTime                 @default(now())
+  loanFacility             LoanFacility             @relation(fields: [loanFacilityId], references: [id], onDelete: Restrict)
+  interestCalculation      InterestCalculation?     @relation(fields: [interestCalculationId], references: [id], onDelete: Restrict)
+  entries                  RepaymentScheduleEntry[]
+
+  @@index([loanFacilityId])
+  @@index([loanFacilityId, createdAt])
+  @@index([interestCalculationId])
+}
+
+/// One persisted schedule instalment. dueDate is a resolved date supplied by the caller, not an MSPS due-date rule.
+model RepaymentScheduleEntry {
+  id                    String            @id @default(uuid())
+  repaymentScheduleId   String
+  sequence              Int
+  dueDate               DateTime          @db.Date
+  openingPrincipal      Decimal           @db.Decimal(18, 2)
+  scheduledPrincipal    Decimal           @db.Decimal(18, 2)
+  scheduledInterest     Decimal           @db.Decimal(18, 2)
+  totalScheduledAmount  Decimal           @db.Decimal(18, 2)
+  closingPrincipal      Decimal           @db.Decimal(18, 2)
+  createdAt             DateTime          @default(now())
+  repaymentSchedule     RepaymentSchedule @relation(fields: [repaymentScheduleId], references: [id], onDelete: Restrict)
+
+  @@unique([repaymentScheduleId, sequence])
+  @@index([repaymentScheduleId])
 }
