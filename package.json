@@ -12,7 +12,7 @@
     "build": "tsc --project tsconfig.json",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit --project tsconfig.json",
-    "test": "tsx --test tests/interest-repayment-policy.test.ts tests/product-version-policy-lifecycle.test.ts tests/annual-interest-allocation.test.ts tests/repayment-schedule-engine.test.ts tests/interest-repayment-persistence.test.ts",
+    "test": "tsx --test tests/interest-repayment-policy.test.ts tests/product-version-policy-lifecycle.test.ts tests/annual-interest-allocation.test.ts tests/repayment-schedule-engine.test.ts tests/interest-repayment-persistence.test.ts tests/financial-snapshot-validation.test.ts tests/principal-resolver.test.ts",
     "postinstall": "prisma generate",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",

@@ -318,6 +318,7 @@ model LoanFacility {
   interestCalculations      InterestCalculation[]
   repaymentSchedules        RepaymentSchedule[]
 
+  @@unique([id, productVersionId])
   @@index([borrowerId])
   @@index([loanProductId])
   @@index([productVersionId])
@@ -360,9 +361,14 @@ model LoanTransaction {
 /// Append-only interest calculation snapshot. A later calculation inserts a new row.
 /// periodStart and periodEnd are stored only when a caller supplies already-resolved bounds.
 /// This model does not derive a calendar year, anniversary, or facility year, and it does not select an MSPS anchor.
+/// productVersionId must be the facility's own ProductVersion. historySequence is append order, not financial authority.
 model InterestCalculation {
   id                      String               @id @default(uuid())
   loanFacilityId          String
+  productVersionId        String
+  /// Facility-scoped append order. A future writer allocates it while holding the facility row lock.
+  /// The highest value is not the authoritative calculation.
+  historySequence         Int
   calculationStrategy     String
   principalAmount         Decimal              @db.Decimal(18, 2)
   annualRate              Decimal              @db.Decimal(18, 4)
@@ -375,11 +381,12 @@ model InterestCalculation {
   policySnapshot          Json
   resultSnapshot          Json
   createdAt               DateTime             @default(now())
-  loanFacility            LoanFacility         @relation(fields: [loanFacilityId], references: [id], onDelete: Restrict)
+  loanFacility            LoanFacility         @relation(fields: [loanFacilityId, productVersionId], references: [id, productVersionId], onDelete: Restrict)
   allocations             InterestAllocation[]
   repaymentSchedules      RepaymentSchedule[]
 
-  @@index([loanFacilityId])
+  @@unique([id, loanFacilityId])
+  @@unique([loanFacilityId, historySequence])
   @@index([loanFacilityId, createdAt])
 }
 
@@ -398,10 +405,16 @@ model InterestAllocation {
 
 /// Append-only repayment schedule snapshot. A later schedule inserts a new row.
 /// interestCalculationId is optional: a schedule may be assembled from supplied allocations that do not come from one stored calculation.
+/// When present, the calculation must belong to this same facility. productVersionId must be the facility's own ProductVersion.
+/// historySequence is append order for schedules only. It is independent of calculation history and is not financial authority.
 /// due dates live on entries. This model does not derive them and does not select MSPS repayment policy.
 model RepaymentSchedule {
   id                       String                   @id @default(uuid())
   loanFacilityId           String
+  productVersionId         String
+  /// Facility-scoped append order among schedules. A future writer allocates it while holding the facility row lock.
+  /// The highest value is not the authoritative schedule.
+  historySequence          Int
   interestCalculationId    String?
   principalAmount          Decimal                  @db.Decimal(18, 2)
   totalScheduledPrincipal  Decimal                  @db.Decimal(18, 2)
@@ -413,11 +426,11 @@ model RepaymentSchedule {
   policySnapshot           Json
   resultSnapshot           Json
   createdAt                DateTime                 @default(now())
-  loanFacility             LoanFacility             @relation(fields: [loanFacilityId], references: [id], onDelete: Restrict)
-  interestCalculation      InterestCalculation?     @relation(fields: [interestCalculationId], references: [id], onDelete: Restrict)
+  loanFacility             LoanFacility             @relation(fields: [loanFacilityId, productVersionId], references: [id, productVersionId], onDelete: Restrict)
+  interestCalculation      InterestCalculation?     @relation(fields: [interestCalculationId, loanFacilityId], references: [id, loanFacilityId], onDelete: Restrict)
   entries                  RepaymentScheduleEntry[]
 
-  @@index([loanFacilityId])
+  @@unique([loanFacilityId, historySequence])
   @@index([loanFacilityId, createdAt])
   @@index([interestCalculationId])
 }

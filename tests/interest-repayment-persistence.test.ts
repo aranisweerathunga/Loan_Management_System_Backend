@@ -31,6 +31,22 @@ function money(value: Prisma.Decimal | string): string {
   return new Prisma.Decimal(value).toFixed(2);
 }
 
+function provenance(graph: Required<GraphIds>, historySequence: number) {
+  return {
+    loanFacilityId: graph.facilityId,
+    productVersionId: graph.versionId,
+    historySequence,
+  };
+}
+
+function isForeignKeyViolation(error: unknown): boolean {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2003";
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+}
+
 async function readSequences(): Promise<{ facilities: SequenceRow[]; applications: SequenceRow[] }> {
   const facilities = await prisma.loanFacilityNumberSequence.findMany({
     orderBy: { calendarYear: "asc" },
@@ -217,7 +233,7 @@ describe("interest and repayment persistence", () => {
       };
       const stored = await prisma.interestCalculation.create({
         data: {
-          loanFacilityId: graph.facilityId,
+          ...provenance(graph, 1),
           calculationStrategy: first.calculationStrategy,
           principalAmount: first.principalAmount,
           annualRate: first.annualRate,
@@ -245,6 +261,8 @@ describe("interest and repayment persistence", () => {
       assert.equal(money(stored.principalAmount), "1000000.00");
       assert.equal(new Prisma.Decimal(stored.annualRate).toFixed(4), "10.0000");
       assert.equal(money(stored.annualInterestAmount), "100000.00");
+      assert.equal(stored.productVersionId, graph.versionId);
+      assert.equal(stored.historySequence, 1);
       assert.equal(stored.periodStart, null);
       assert.equal(stored.periodEnd, null);
       assert.equal(stored.allocations.length, 12);
@@ -268,7 +286,7 @@ describe("interest and repayment persistence", () => {
       });
       await prisma.interestCalculation.create({
         data: {
-          loanFacilityId: graph.facilityId,
+          ...provenance(graph, 2),
           calculationStrategy: second.calculationStrategy,
           principalAmount: second.principalAmount,
           annualRate: second.annualRate,
@@ -289,7 +307,7 @@ describe("interest and repayment persistence", () => {
 
       const history = await prisma.interestCalculation.findMany({
         where: { loanFacilityId: graph.facilityId },
-        orderBy: { createdAt: "asc" },
+        orderBy: { historySequence: "asc" },
       });
       assert.equal(history.length, 2);
       assert.equal(money(history[0]?.principalAmount ?? "0"), "1000000.00");
@@ -306,7 +324,7 @@ describe("interest and repayment persistence", () => {
     try {
       const calculation = await prisma.interestCalculation.create({
         data: {
-          loanFacilityId: graph.facilityId,
+          ...provenance(graph, 1),
           calculationStrategy: "ANNUAL_INTEREST_ALLOCATION",
           principalAmount: "10.00",
           annualRate: "0.0000",
@@ -346,7 +364,7 @@ describe("interest and repayment persistence", () => {
     try {
       const calculation = await prisma.interestCalculation.create({
         data: {
-          loanFacilityId: graph.facilityId,
+          ...provenance(graph, 1),
           calculationStrategy: "ANNUAL_INTEREST_ALLOCATION",
           principalAmount: "100.00",
           annualRate: "0.0000",
@@ -367,7 +385,7 @@ describe("interest and repayment persistence", () => {
       });
       const storedFull = await prisma.repaymentSchedule.create({
         data: {
-          loanFacilityId: graph.facilityId,
+          ...provenance(graph, 1),
           interestCalculationId: calculation.id,
           principalAmount: full.principalAmount,
           totalScheduledPrincipal: full.totalScheduledPrincipal,
@@ -415,7 +433,7 @@ describe("interest and repayment persistence", () => {
       });
       const storedPartial = await prisma.repaymentSchedule.create({
         data: {
-          loanFacilityId: graph.facilityId,
+          ...provenance(graph, 2),
           principalAmount: partial.principalAmount,
           totalScheduledPrincipal: partial.totalScheduledPrincipal,
           totalScheduledInterest: partial.totalScheduledInterest,
@@ -465,7 +483,7 @@ describe("interest and repayment persistence", () => {
     try {
       const schedule = await prisma.repaymentSchedule.create({
         data: {
-          loanFacilityId: graph.facilityId,
+          ...provenance(graph, 1),
           principalAmount: "10.00",
           totalScheduledPrincipal: "10.00",
           totalScheduledInterest: "0.00",
@@ -513,6 +531,223 @@ describe("interest and repayment persistence", () => {
       );
     } finally {
       await destroyGraph(graph);
+    }
+  });
+
+  it("keeps a calculation reference on the same facility and the facility product version", async () => {
+    const graph = await createGraph();
+    const other = await createGraph();
+    let otherVersionId: string | undefined;
+    try {
+      const calculation = await prisma.interestCalculation.create({
+        data: {
+          ...provenance(graph, 1),
+          calculationStrategy: "ANNUAL_INTEREST_ALLOCATION",
+          principalAmount: "100.00",
+          annualRate: "10.0000",
+          annualInterestAmount: "10.00",
+          allocationFrequency: "MONTHLY",
+          recalculationFrequency: "ANNUAL",
+          inputSnapshot: asJson({ principalAmount: "100.00" }),
+          policySnapshot: asJson({}),
+          resultSnapshot: asJson({ annualInterestAmount: "10.00" }),
+        },
+      });
+      const linked = await prisma.repaymentSchedule.create({
+        data: {
+          ...provenance(graph, 1),
+          interestCalculationId: calculation.id,
+          principalAmount: "100.00",
+          totalScheduledPrincipal: "100.00",
+          totalScheduledInterest: "0.00",
+          totalScheduledAmount: "100.00",
+          remainingPrincipal: "0.00",
+          numberOfInstalments: 1,
+          inputSnapshot: asJson({ principalAmount: "100.00" }),
+          policySnapshot: asJson({}),
+          resultSnapshot: asJson({ remainingPrincipal: "0.00" }),
+        },
+      });
+      assert.equal(linked.interestCalculationId, calculation.id);
+      assert.equal(linked.loanFacilityId, calculation.loanFacilityId);
+      assert.equal(linked.productVersionId, graph.versionId);
+
+      const unlinked = await prisma.repaymentSchedule.create({
+        data: {
+          ...provenance(graph, 2),
+          principalAmount: "100.00",
+          totalScheduledPrincipal: "40.00",
+          totalScheduledInterest: "0.00",
+          totalScheduledAmount: "40.00",
+          remainingPrincipal: "60.00",
+          numberOfInstalments: 1,
+          inputSnapshot: asJson({ principalAmount: "100.00" }),
+          policySnapshot: asJson({}),
+          resultSnapshot: asJson({ remainingPrincipal: "60.00" }),
+        },
+      });
+      assert.equal(unlinked.interestCalculationId, null);
+
+      const otherCalculation = await prisma.interestCalculation.create({
+        data: {
+          ...provenance(other, 1),
+          calculationStrategy: "ANNUAL_INTEREST_ALLOCATION",
+          principalAmount: "50.00",
+          annualRate: "1.0000",
+          annualInterestAmount: "0.50",
+          allocationFrequency: "MONTHLY",
+          recalculationFrequency: "ANNUAL",
+          inputSnapshot: asJson({ principalAmount: "50.00" }),
+          policySnapshot: asJson({}),
+          resultSnapshot: asJson({ annualInterestAmount: "0.50" }),
+        },
+      });
+      await assert.rejects(
+        () =>
+          prisma.repaymentSchedule.create({
+            data: {
+              ...provenance(graph, 3),
+              interestCalculationId: otherCalculation.id,
+              principalAmount: "100.00",
+              totalScheduledPrincipal: "0.00",
+              totalScheduledInterest: "0.00",
+              totalScheduledAmount: "0.00",
+              remainingPrincipal: "100.00",
+              numberOfInstalments: 1,
+              inputSnapshot: asJson({}),
+              policySnapshot: asJson({}),
+              resultSnapshot: asJson({}),
+            },
+          }),
+        isForeignKeyViolation,
+      );
+
+      otherVersionId = (
+        await prisma.productVersion.create({
+          data: {
+            loanProductId: graph.productId,
+            versionNumber: 2,
+            effectiveFrom: utcDate("2026-02-01"),
+            configuration: {},
+          },
+        })
+      ).id;
+      await assert.rejects(
+        () =>
+          prisma.interestCalculation.create({
+            data: {
+              loanFacilityId: graph.facilityId,
+              productVersionId: otherVersionId,
+              historySequence: 2,
+              calculationStrategy: "ANNUAL_INTEREST_ALLOCATION",
+              principalAmount: "100.00",
+              annualRate: "10.0000",
+              annualInterestAmount: "10.00",
+              allocationFrequency: "MONTHLY",
+              recalculationFrequency: "ANNUAL",
+              inputSnapshot: asJson({}),
+              policySnapshot: asJson({}),
+              resultSnapshot: asJson({}),
+            },
+          }),
+        isForeignKeyViolation,
+      );
+      await assert.rejects(
+        () =>
+          prisma.repaymentSchedule.create({
+            data: {
+              loanFacilityId: graph.facilityId,
+              productVersionId: otherVersionId,
+              historySequence: 4,
+              principalAmount: "100.00",
+              totalScheduledPrincipal: "0.00",
+              totalScheduledInterest: "0.00",
+              totalScheduledAmount: "0.00",
+              remainingPrincipal: "100.00",
+              numberOfInstalments: 1,
+              inputSnapshot: asJson({}),
+              policySnapshot: asJson({}),
+              resultSnapshot: asJson({}),
+            },
+          }),
+        isForeignKeyViolation,
+      );
+
+      await assert.rejects(
+        () =>
+          prisma.interestCalculation.create({
+            data: {
+              ...provenance(graph, 1),
+              calculationStrategy: "ANNUAL_INTEREST_ALLOCATION",
+              principalAmount: "1.00",
+              annualRate: "1.0000",
+              annualInterestAmount: "0.01",
+              allocationFrequency: "MONTHLY",
+              recalculationFrequency: "ANNUAL",
+              inputSnapshot: asJson({}),
+              policySnapshot: asJson({}),
+              resultSnapshot: asJson({}),
+            },
+          }),
+        isUniqueViolation,
+      );
+      await prisma.interestCalculation.create({
+        data: {
+          ...provenance(graph, 2),
+          calculationStrategy: "ANNUAL_INTEREST_ALLOCATION",
+          principalAmount: "1.00",
+          annualRate: "1.0000",
+          annualInterestAmount: "0.01",
+          allocationFrequency: "MONTHLY",
+          recalculationFrequency: "ANNUAL",
+          inputSnapshot: asJson({}),
+          policySnapshot: asJson({}),
+          resultSnapshot: asJson({}),
+        },
+      });
+      await assert.rejects(
+        () =>
+          prisma.repaymentSchedule.create({
+            data: {
+              ...provenance(graph, 1),
+              principalAmount: "1.00",
+              totalScheduledPrincipal: "1.00",
+              totalScheduledInterest: "0.00",
+              totalScheduledAmount: "1.00",
+              remainingPrincipal: "0.00",
+              numberOfInstalments: 1,
+              inputSnapshot: asJson({}),
+              policySnapshot: asJson({}),
+              resultSnapshot: asJson({}),
+            },
+          }),
+        isUniqueViolation,
+      );
+
+      const calculations = await prisma.interestCalculation.findMany({
+        where: { loanFacilityId: graph.facilityId },
+        orderBy: { historySequence: "asc" },
+        select: { historySequence: true },
+      });
+      assert.deepEqual(
+        calculations.map((row) => row.historySequence),
+        [1, 2],
+      );
+      const schedules = await prisma.repaymentSchedule.findMany({
+        where: { loanFacilityId: graph.facilityId },
+        orderBy: { historySequence: "asc" },
+        select: { historySequence: true },
+      });
+      assert.deepEqual(
+        schedules.map((row) => row.historySequence),
+        [1, 2],
+      );
+    } finally {
+      if (otherVersionId) {
+        await prisma.productVersion.delete({ where: { id: otherVersionId } });
+      }
+      await destroyGraph(graph);
+      await destroyGraph(other);
     }
   });
 });
