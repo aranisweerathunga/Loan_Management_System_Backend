@@ -288,6 +288,11 @@ enum LoanTransactionType {
   DISBURSEMENT
 }
 
+enum FinancialSnapshotType {
+  INTEREST_CALCULATION
+  REPAYMENT_SCHEDULE
+}
+
 model LoanFacilityNumberSequence {
   calendarYear Int @id
   lastValue    Int
@@ -317,6 +322,7 @@ model LoanFacility {
   transactions              LoanTransaction[]
   interestCalculations      InterestCalculation[]
   repaymentSchedules        RepaymentSchedule[]
+  financialSnapshotRequests FinancialSnapshotRequest[]
 
   @@unique([id, productVersionId])
   @@index([borrowerId])
@@ -381,9 +387,10 @@ model InterestCalculation {
   policySnapshot          Json
   resultSnapshot          Json
   createdAt               DateTime             @default(now())
-  loanFacility            LoanFacility         @relation(fields: [loanFacilityId, productVersionId], references: [id, productVersionId], onDelete: Restrict)
-  allocations             InterestAllocation[]
-  repaymentSchedules      RepaymentSchedule[]
+  loanFacility              LoanFacility               @relation(fields: [loanFacilityId, productVersionId], references: [id, productVersionId], onDelete: Restrict)
+  allocations               InterestAllocation[]
+  repaymentSchedules        RepaymentSchedule[]
+  financialSnapshotRequests FinancialSnapshotRequest[]
 
   @@unique([id, loanFacilityId])
   @@unique([loanFacilityId, historySequence])
@@ -426,10 +433,12 @@ model RepaymentSchedule {
   policySnapshot           Json
   resultSnapshot           Json
   createdAt                DateTime                 @default(now())
-  loanFacility             LoanFacility             @relation(fields: [loanFacilityId, productVersionId], references: [id, productVersionId], onDelete: Restrict)
-  interestCalculation      InterestCalculation?     @relation(fields: [interestCalculationId, loanFacilityId], references: [id, loanFacilityId], onDelete: Restrict)
-  entries                  RepaymentScheduleEntry[]
+  loanFacility              LoanFacility               @relation(fields: [loanFacilityId, productVersionId], references: [id, productVersionId], onDelete: Restrict)
+  interestCalculation       InterestCalculation?       @relation(fields: [interestCalculationId, loanFacilityId], references: [id, loanFacilityId], onDelete: Restrict)
+  entries                   RepaymentScheduleEntry[]
+  financialSnapshotRequests FinancialSnapshotRequest[]
 
+  @@unique([id, loanFacilityId])
   @@unique([loanFacilityId, historySequence])
   @@index([loanFacilityId, createdAt])
   @@index([interestCalculationId])
@@ -450,5 +459,28 @@ model RepaymentScheduleEntry {
   repaymentSchedule     RepaymentSchedule @relation(fields: [repaymentScheduleId], references: [id], onDelete: Restrict)
 
   @@unique([repaymentScheduleId, sequence])
+  @@index([repaymentScheduleId])
+}
+
+/// Accepted idempotency record for one financial snapshot write.
+/// idempotencyKey is supplied by the caller. This model does not generate it.
+/// A database CHECK requires exactly one snapshot target, matching snapshotType.
+/// Prisma cannot represent that CHECK. ON UPDATE RESTRICT keeps a later identity change from rewriting this link.
+/// Snapshots created before this table have no request row and remain valid.
+model FinancialSnapshotRequest {
+  id                    String                @id @default(uuid())
+  loanFacilityId        String
+  snapshotType          FinancialSnapshotType
+  idempotencyKey        String                @db.Uuid
+  requestFingerprint    String                @db.VarChar(64)
+  interestCalculationId String?
+  repaymentScheduleId   String?
+  createdAt             DateTime              @default(now())
+  loanFacility          LoanFacility          @relation(fields: [loanFacilityId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  interestCalculation   InterestCalculation?  @relation(fields: [interestCalculationId, loanFacilityId], references: [id, loanFacilityId], onDelete: Restrict, onUpdate: Restrict)
+  repaymentSchedule     RepaymentSchedule?    @relation(fields: [repaymentScheduleId, loanFacilityId], references: [id, loanFacilityId], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([loanFacilityId, snapshotType, idempotencyKey])
+  @@index([interestCalculationId])
   @@index([repaymentScheduleId])
 }
