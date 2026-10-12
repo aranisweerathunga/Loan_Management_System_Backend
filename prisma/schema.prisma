@@ -74,6 +74,7 @@ model ProductVersion {
   eligibilityAssessments EligibilityAssessment[]
   loanFacilities         LoanFacility[]
 
+  @@unique([id, loanProductId])
   @@unique([loanProductId, versionNumber])
   @@index([loanProductId])
   @@index([loanProductId, status])
@@ -218,7 +219,7 @@ model LoanApplication {
   updatedAt              DateTime                   @updatedAt
   borrower               Borrower                   @relation(fields: [borrowerId], references: [id], onDelete: Restrict)
   loanProduct            LoanProduct                @relation(fields: [loanProductId], references: [id], onDelete: Restrict)
-  productVersion         ProductVersion             @relation(fields: [productVersionId], references: [id], onDelete: Restrict)
+  productVersion         ProductVersion             @relation(fields: [productVersionId, loanProductId], references: [id, loanProductId], onDelete: Restrict, onUpdate: Restrict)
   productPurpose         ProductPurpose?            @relation(fields: [productPurposeId], references: [id], onDelete: Restrict)
   statusHistory          ApplicationStatusHistory[]
   eligibilityAssessments EligibilityAssessment[]
@@ -316,7 +317,7 @@ model LoanFacility {
   loanApplication           LoanApplication    @relation(fields: [loanApplicationId], references: [id], onDelete: Restrict)
   borrower                  Borrower           @relation(fields: [borrowerId], references: [id], onDelete: Restrict)
   loanProduct               LoanProduct        @relation(fields: [loanProductId], references: [id], onDelete: Restrict)
-  productVersion            ProductVersion     @relation(fields: [productVersionId], references: [id], onDelete: Restrict)
+  productVersion            ProductVersion     @relation(fields: [productVersionId, loanProductId], references: [id, loanProductId], onDelete: Restrict, onUpdate: Restrict)
   productPurpose            ProductPurpose?    @relation(fields: [productPurposeId], references: [id], onDelete: Restrict)
   disbursements             LoanDisbursement[]
   transactions              LoanTransaction[]
@@ -387,7 +388,7 @@ model InterestCalculation {
   policySnapshot          Json
   resultSnapshot          Json
   createdAt               DateTime             @default(now())
-  loanFacility              LoanFacility               @relation(fields: [loanFacilityId, productVersionId], references: [id, productVersionId], onDelete: Restrict)
+  loanFacility              LoanFacility               @relation(fields: [loanFacilityId, productVersionId], references: [id, productVersionId], onDelete: Restrict, onUpdate: Restrict)
   allocations               InterestAllocation[]
   repaymentSchedules        RepaymentSchedule[]
   financialSnapshotRequests FinancialSnapshotRequest[]
@@ -433,8 +434,8 @@ model RepaymentSchedule {
   policySnapshot           Json
   resultSnapshot           Json
   createdAt                DateTime                 @default(now())
-  loanFacility              LoanFacility               @relation(fields: [loanFacilityId, productVersionId], references: [id, productVersionId], onDelete: Restrict)
-  interestCalculation       InterestCalculation?       @relation(fields: [interestCalculationId, loanFacilityId], references: [id, loanFacilityId], onDelete: Restrict)
+  loanFacility              LoanFacility               @relation(fields: [loanFacilityId, productVersionId], references: [id, productVersionId], onDelete: Restrict, onUpdate: Restrict)
+  interestCalculation       InterestCalculation?       @relation(fields: [interestCalculationId, loanFacilityId], references: [id, loanFacilityId], onDelete: Restrict, onUpdate: Restrict)
   entries                   RepaymentScheduleEntry[]
   financialSnapshotRequests FinancialSnapshotRequest[]
 

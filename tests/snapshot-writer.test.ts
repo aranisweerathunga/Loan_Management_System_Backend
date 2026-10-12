@@ -1134,4 +1134,154 @@ describe("internal financial snapshot writer", () => {
       await destroyGraph(other);
     }
   });
+
+  it("rejects a product-version mismatch and a facility version change after a snapshot", async () => {
+    const graph = await createGraph();
+    const suffix = randomUUID().slice(0, 8);
+    let sameProductVersionId: string | undefined;
+    let otherProductId: string | undefined;
+    let otherVersionId: string | undefined;
+    try {
+      const facility = await prisma.loanFacility.findUniqueOrThrow({ where: { id: graph.facilityId } });
+      const application = await prisma.loanApplication.findUniqueOrThrow({ where: { id: graph.applicationId } });
+      const version = await prisma.productVersion.findUniqueOrThrow({ where: { id: graph.versionId } });
+      assert.equal(facility.productVersionId, version.id);
+      assert.equal(facility.loanProductId, version.loanProductId);
+      assert.equal(application.productVersionId, version.id);
+      assert.equal(application.loanProductId, version.loanProductId);
+
+      otherProductId = (
+        await prisma.loanProduct.create({
+          data: {
+            categoryId: graph.categoryId,
+            code: `P8V${suffix}`.slice(0, 32),
+            name: "Provenance other product",
+          },
+        })
+      ).id;
+      otherVersionId = (
+        await prisma.productVersion.create({
+          data: {
+            loanProductId: otherProductId,
+            versionNumber: 1,
+            effectiveFrom: utcDate("2026-06-01"),
+            configuration: { interestPolicy, repaymentPolicy },
+          },
+        })
+      ).id;
+
+      await assert.rejects(
+        () =>
+          prisma.$executeRaw`
+            UPDATE "LoanFacility"
+            SET "productVersionId" = ${otherVersionId}
+            WHERE "id" = ${graph.facilityId}
+          `,
+        (error: unknown) =>
+          error instanceof Error && error.message.includes("LoanFacility_productVersionId_loanProductId_fkey"),
+      );
+      await assert.rejects(
+        () =>
+          prisma.$executeRaw`
+            UPDATE "LoanApplication"
+            SET "productVersionId" = ${otherVersionId}
+            WHERE "id" = ${graph.applicationId}
+          `,
+        (error: unknown) =>
+          error instanceof Error && error.message.includes("LoanApplication_productVersionId_loanProductId_fkey"),
+      );
+      assert.equal(
+        (await prisma.loanFacility.findUniqueOrThrow({ where: { id: graph.facilityId } })).productVersionId,
+        graph.versionId,
+      );
+      assert.equal(
+        (await prisma.loanApplication.findUniqueOrThrow({ where: { id: graph.applicationId } })).productVersionId,
+        graph.versionId,
+      );
+
+      const calculation = await persistCalculation(calculationPayload(graph, "100.00"));
+      sameProductVersionId = (
+        await prisma.productVersion.create({
+          data: {
+            loanProductId: graph.productId,
+            versionNumber: 2,
+            effectiveFrom: utcDate("2026-07-01"),
+            configuration: { interestPolicy, repaymentPolicy },
+          },
+        })
+      ).id;
+      await assert.rejects(
+        () =>
+          prisma.$executeRaw`
+            UPDATE "LoanFacility"
+            SET "productVersionId" = ${sameProductVersionId}
+            WHERE "id" = ${graph.facilityId}
+          `,
+        (error: unknown) =>
+          error instanceof Error &&
+          error.message.includes("InterestCalculation_loanFacilityId_productVersionId_fkey"),
+      );
+      assert.equal(
+        (await prisma.interestCalculation.findUniqueOrThrow({ where: { id: calculation.id } })).productVersionId,
+        graph.versionId,
+      );
+      assert.equal(
+        (await prisma.loanFacility.findUniqueOrThrow({ where: { id: graph.facilityId } })).productVersionId,
+        graph.versionId,
+      );
+    } finally {
+      if (sameProductVersionId) {
+        await prisma.productVersion.delete({ where: { id: sameProductVersionId } });
+      }
+      if (otherVersionId) {
+        await prisma.productVersion.delete({ where: { id: otherVersionId } });
+      }
+      if (otherProductId) {
+        await prisma.loanProduct.delete({ where: { id: otherProductId } });
+      }
+      await destroyGraph(graph);
+    }
+  });
+
+  it("rejects a facility version change after a repayment schedule exists", async () => {
+    const graph = await createGraph();
+    let replacementVersionId: string | undefined;
+    try {
+      const schedule = await persistSchedule(schedulePayload(graph, fullSchedule));
+      replacementVersionId = (
+        await prisma.productVersion.create({
+          data: {
+            loanProductId: graph.productId,
+            versionNumber: 2,
+            effectiveFrom: utcDate("2026-08-01"),
+            configuration: { interestPolicy, repaymentPolicy },
+          },
+        })
+      ).id;
+      await assert.rejects(
+        () =>
+          prisma.$executeRaw`
+            UPDATE "LoanFacility"
+            SET "productVersionId" = ${replacementVersionId}
+            WHERE "id" = ${graph.facilityId}
+          `,
+        (error: unknown) =>
+          error instanceof Error &&
+          error.message.includes("RepaymentSchedule_loanFacilityId_productVersionId_fkey"),
+      );
+      assert.equal(
+        (await prisma.repaymentSchedule.findUniqueOrThrow({ where: { id: schedule.id } })).productVersionId,
+        graph.versionId,
+      );
+      assert.equal(
+        (await prisma.loanFacility.findUniqueOrThrow({ where: { id: graph.facilityId } })).productVersionId,
+        graph.versionId,
+      );
+    } finally {
+      if (replacementVersionId) {
+        await prisma.productVersion.delete({ where: { id: replacementVersionId } });
+      }
+      await destroyGraph(graph);
+    }
+  });
 });
