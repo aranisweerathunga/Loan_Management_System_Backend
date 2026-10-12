@@ -235,7 +235,27 @@ const partialSchedule = {
   interestAllocations: ["0.00", "0.00", "0.00"],
 };
 
+function calculationWithPeriod(graph: Required<GraphIds>, principalAmount: string, periodStart: string, periodEnd: string) {
+  const payload = calculationPayload(graph, principalAmount);
+  return {
+    ...payload,
+    periodStart,
+    periodEnd,
+    inputSnapshot: {
+      ...payload.inputSnapshot,
+      periodStart,
+      periodEnd,
+    },
+  };
+}
+
+function isConflict(error: unknown): boolean {
+  return error instanceof AppError && error.statusCode === 409 && error.code === "CONFLICT";
+}
+
 before(async () => {
+  const databases = await prisma.$queryRaw<Array<{ name: string }>>`SELECT current_database() AS name`;
+  assert.equal(databases[0]?.name, "loan_management_db");
   const sequences = await readSequences();
   facilitySequencesBefore = sequences.facilities;
   applicationSequencesBefore = sequences.applications;
@@ -713,6 +733,405 @@ describe("internal financial snapshot writer", () => {
       );
     } finally {
       await destroyGraph(graph);
+    }
+  });
+
+  it("creates one snapshot and one request for each snapshot type", async () => {
+    const graph = await createGraph();
+    const key = randomUUID().toUpperCase();
+    try {
+      const calculation = await persistInterestCalculationSnapshot(
+        calculationWithPeriod(graph, "1000000.00", "2026-01-01", "2026-12-31"),
+        key,
+      );
+      const schedule = await persistRepaymentScheduleSnapshot(
+        schedulePayload(graph, fullSchedule, calculation.id),
+        key,
+      );
+      assert.equal(calculation.historySequence, 1);
+      assert.equal(schedule.historySequence, 1);
+      assert.equal(calculation.periodStart, "2026-01-01");
+      assert.equal(calculation.periodEnd, "2026-12-31");
+      assert.equal(calculation.annualRate, "10.0000");
+      assert.deepEqual(
+        calculation.allocations.map((allocation) => allocation.sequence),
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+      );
+      assert.deepEqual(
+        schedule.entries.map((entry) => entry.sequence),
+        [1, 2],
+      );
+
+      const requests = await prisma.financialSnapshotRequest.findMany({
+        where: { loanFacilityId: graph.facilityId },
+        orderBy: { snapshotType: "asc" },
+      });
+      assert.equal(requests.length, 2);
+      assert.equal(requests[0]?.snapshotType, "INTEREST_CALCULATION");
+      assert.equal(requests[0]?.idempotencyKey, key.toLowerCase());
+      assert.equal(requests[0]?.interestCalculationId, calculation.id);
+      assert.equal(requests[0]?.repaymentScheduleId, null);
+      assert.match(requests[0]?.requestFingerprint ?? "", /^[0-9a-f]{64}$/);
+      assert.equal(requests[1]?.snapshotType, "REPAYMENT_SCHEDULE");
+      assert.equal(requests[1]?.idempotencyKey, key.toLowerCase());
+      assert.equal(requests[1]?.repaymentScheduleId, schedule.id);
+      assert.equal(requests[1]?.interestCalculationId, null);
+      assert.equal(await prisma.interestCalculation.count({ where: { loanFacilityId: graph.facilityId } }), 1);
+      assert.equal(await prisma.repaymentSchedule.count({ where: { loanFacilityId: graph.facilityId } }), 1);
+      assert.equal(
+        await prisma.interestAllocation.count({
+          where: { interestCalculation: { loanFacilityId: graph.facilityId } },
+        }),
+        12,
+      );
+      assert.equal(
+        await prisma.repaymentScheduleEntry.count({
+          where: { repaymentSchedule: { loanFacilityId: graph.facilityId } },
+        }),
+        2,
+      );
+    } finally {
+      await destroyGraph(graph);
+    }
+  });
+
+  it("replays the original financial snapshot after the live policy changes", async () => {
+    const graph = await createGraph();
+    const key = randomUUID();
+    try {
+      const payload = calculationWithPeriod(graph, "1000000.00", "2026-01-01", "2026-12-31");
+      const first = await persistInterestCalculationSnapshot(payload, key);
+      const storedBefore = await prisma.interestCalculation.findUniqueOrThrow({ where: { id: first.id } });
+      await prisma.productVersion.update({
+        where: { id: graph.versionId },
+        data: {
+          configuration: {
+            interestPolicy: { ...interestPolicy, annualRate: "12.0000" },
+            repaymentPolicy,
+          },
+        },
+      });
+
+      const replay = await persistInterestCalculationSnapshot(payload, key);
+      assert.deepEqual(replay, first);
+      assert.equal(replay.annualRate, "10.0000");
+      assert.equal(replay.periodStart, "2026-01-01");
+      assert.equal(replay.periodEnd, "2026-12-31");
+      assert.equal(replay.allocations[0]?.interestAmount, "8333.34");
+      const storedAfter = await prisma.interestCalculation.findUniqueOrThrow({ where: { id: first.id } });
+      assert.deepEqual(storedAfter.resultSnapshot, storedBefore.resultSnapshot);
+      assert.deepEqual(storedAfter.policySnapshot, storedBefore.policySnapshot);
+      assert.equal(await prisma.interestCalculation.count({ where: { loanFacilityId: graph.facilityId } }), 1);
+
+      await assert.rejects(
+        () => persistInterestCalculationSnapshot(payload, randomUUID()),
+        (error: unknown) => isConflict(error),
+      );
+      assert.equal(await prisma.interestCalculation.count({ where: { loanFacilityId: graph.facilityId } }), 1);
+    } finally {
+      await destroyGraph(graph);
+    }
+  });
+
+  it("treats a different key as a new event and a reused schedule key as a conflict", async () => {
+    const graph = await createGraph();
+    const scheduleKey = randomUUID();
+    try {
+      const payload = calculationPayload(graph, "1000000.00");
+      const first = await persistInterestCalculationSnapshot(payload, randomUUID());
+      const second = await persistInterestCalculationSnapshot(payload, randomUUID());
+      assert.notEqual(first.id, second.id);
+      assert.equal(first.historySequence, 1);
+      assert.equal(second.historySequence, 2);
+      assert.equal(await prisma.interestCalculation.count({ where: { loanFacilityId: graph.facilityId } }), 2);
+
+      const schedule = await persistRepaymentScheduleSnapshot(schedulePayload(graph, fullSchedule), scheduleKey);
+      await assert.rejects(
+        () => persistRepaymentScheduleSnapshot(schedulePayload(graph, partialSchedule), scheduleKey),
+        (error: unknown) => isConflict(error) && /different snapshot/.test(error.message),
+      );
+      const stored = await prisma.repaymentSchedule.findUniqueOrThrow({ where: { id: schedule.id } });
+      assert.equal(stored.historySequence, 1);
+      assert.equal(money(stored.remainingPrincipal), "0.00");
+      assert.equal(await prisma.repaymentSchedule.count({ where: { loanFacilityId: graph.facilityId } }), 1);
+      assert.equal(
+        await prisma.financialSnapshotRequest.count({
+          where: { loanFacilityId: graph.facilityId, snapshotType: "REPAYMENT_SCHEDULE" },
+        }),
+        1,
+      );
+    } finally {
+      await destroyGraph(graph);
+    }
+  });
+
+  it("keeps the same key independent across facilities", async () => {
+    const firstGraph = await createGraph();
+    const secondGraph = await createGraph();
+    const key = randomUUID();
+    try {
+      const first = await persistInterestCalculationSnapshot(calculationPayload(firstGraph, "1000000.00"), key);
+      const second = await persistInterestCalculationSnapshot(calculationPayload(secondGraph, "1000000.00"), key);
+      assert.notEqual(first.id, second.id);
+      assert.equal(first.historySequence, 1);
+      assert.equal(second.historySequence, 1);
+      assert.equal(await prisma.financialSnapshotRequest.count({ where: { idempotencyKey: key } }), 2);
+    } finally {
+      await destroyGraph(firstGraph);
+      await destroyGraph(secondGraph);
+    }
+  });
+
+  it("rejects a missing idempotency key before persistence", async () => {
+    const graph = await createGraph();
+    try {
+      await assert.rejects(
+        () => persistInterestCalculationSnapshot(calculationPayload(graph, "100.00"), undefined as unknown as string),
+        (error: unknown) => error instanceof AppError && error.statusCode === 400,
+      );
+      await assert.rejects(
+        () => persistRepaymentScheduleSnapshot(schedulePayload(graph, fullSchedule), ""),
+        (error: unknown) => error instanceof AppError && error.statusCode === 400,
+      );
+      assert.equal(await prisma.interestCalculation.count({ where: { loanFacilityId: graph.facilityId } }), 0);
+      assert.equal(await prisma.repaymentSchedule.count({ where: { loanFacilityId: graph.facilityId } }), 0);
+      assert.equal(await prisma.financialSnapshotRequest.count({ where: { loanFacilityId: graph.facilityId } }), 0);
+    } finally {
+      await destroyGraph(graph);
+    }
+  });
+
+  it("retries a corrected schedule with the same key after a failed attempt", async () => {
+    const graph = await createGraph();
+    const key = randomUUID();
+    try {
+      const invalid = schedulePayload(graph, fullSchedule);
+      invalid.entries = invalid.entries.map((entry, index) =>
+        index === 0 ? { ...entry, scheduledPrincipal: "0.00" } : entry,
+      );
+      await assert.rejects(
+        () => persistRepaymentScheduleSnapshot(invalid, key),
+        (error: unknown) => error instanceof AppError && error.statusCode === 400,
+      );
+      assert.equal(await prisma.repaymentSchedule.count({ where: { loanFacilityId: graph.facilityId } }), 0);
+      assert.equal(
+        await prisma.repaymentScheduleEntry.count({
+          where: { repaymentSchedule: { loanFacilityId: graph.facilityId } },
+        }),
+        0,
+      );
+      assert.equal(await prisma.financialSnapshotRequest.count({ where: { loanFacilityId: graph.facilityId } }), 0);
+
+      const saved = await persistRepaymentScheduleSnapshot(schedulePayload(graph, fullSchedule), key);
+      assert.equal(saved.historySequence, 1);
+      assert.equal(saved.remainingPrincipal, "0.00");
+      assert.equal(await prisma.repaymentSchedule.count({ where: { loanFacilityId: graph.facilityId } }), 1);
+      assert.equal(
+        await prisma.repaymentScheduleEntry.count({
+          where: { repaymentSchedule: { loanFacilityId: graph.facilityId } },
+        }),
+        2,
+      );
+    } finally {
+      await destroyGraph(graph);
+    }
+  });
+
+  it("serializes concurrent schedule writes and mixed snapshot types on one facility", async () => {
+    const schedules = await createGraph();
+    const mixed = await createGraph();
+    const identicalKey = randomUUID();
+    const conflictingKey = randomUUID();
+    try {
+      const identicalPayload = schedulePayload(schedules, fullSchedule);
+      const identical = await Promise.all([
+        persistRepaymentScheduleSnapshot(identicalPayload, identicalKey),
+        persistRepaymentScheduleSnapshot(identicalPayload, identicalKey),
+      ]);
+      assert.equal(identical[0]?.id, identical[1]?.id);
+      assert.deepEqual(identical[0], identical[1]);
+      assert.equal(await prisma.repaymentSchedule.count({ where: { loanFacilityId: schedules.facilityId } }), 1);
+
+      const settled = await Promise.allSettled([
+        persistRepaymentScheduleSnapshot(schedulePayload(schedules, fullSchedule), conflictingKey),
+        persistRepaymentScheduleSnapshot(schedulePayload(schedules, partialSchedule), conflictingKey),
+      ]);
+      assert.equal(settled.filter((result) => result.status === "fulfilled").length, 1);
+      assert.equal(settled.filter((result) => result.status === "rejected").length, 1);
+      const rejected = settled.find((result) => result.status === "rejected");
+      assert.ok(rejected?.status === "rejected" && isConflict(rejected.reason));
+      assert.equal(await prisma.repaymentSchedule.count({ where: { loanFacilityId: schedules.facilityId } }), 2);
+
+      const differentKeys = await Promise.all([
+        persistRepaymentScheduleSnapshot(schedulePayload(schedules, fullSchedule), randomUUID()),
+        persistRepaymentScheduleSnapshot(schedulePayload(schedules, partialSchedule), randomUUID()),
+      ]);
+      assert.deepEqual(
+        differentKeys.map((result) => result.historySequence).sort((left, right) => left - right),
+        [3, 4],
+      );
+
+      const [calculation, schedule] = await Promise.all([
+        persistInterestCalculationSnapshot(calculationPayload(mixed, "100.00"), randomUUID()),
+        persistRepaymentScheduleSnapshot(schedulePayload(mixed, fullSchedule), randomUUID()),
+      ]);
+      assert.equal(calculation.historySequence, 1);
+      assert.equal(schedule.historySequence, 1);
+      assert.equal(await prisma.interestCalculation.count({ where: { loanFacilityId: mixed.facilityId } }), 1);
+      assert.equal(await prisma.repaymentSchedule.count({ where: { loanFacilityId: mixed.facilityId } }), 1);
+      assert.equal(await prisma.financialSnapshotRequest.count({ where: { loanFacilityId: mixed.facilityId } }), 2);
+    } finally {
+      await destroyGraph(schedules);
+      await destroyGraph(mixed);
+    }
+  });
+
+  it("enforces idempotency, target, and history-sequence constraints", async () => {
+    const graph = await createGraph();
+    const other = await createGraph();
+    try {
+      const calculation = await persistCalculation(calculationPayload(graph, "100.00"));
+      const schedule = await persistSchedule(schedulePayload(graph, fullSchedule, calculation.id));
+      const foreign = await persistCalculation(calculationPayload(other, "100.00"));
+      const request = await prisma.financialSnapshotRequest.findFirstOrThrow({
+        where: { interestCalculationId: calculation.id },
+      });
+
+      await assert.rejects(
+        () =>
+          prisma.financialSnapshotRequest.create({
+            data: {
+              loanFacilityId: graph.facilityId,
+              snapshotType: "INTEREST_CALCULATION",
+              idempotencyKey: request.idempotencyKey,
+              requestFingerprint: "a".repeat(64),
+              interestCalculationId: calculation.id,
+            },
+          }),
+        (error: unknown) => error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002",
+      );
+
+      await assert.rejects(
+        () =>
+          prisma.financialSnapshotRequest.create({
+            data: {
+              loanFacilityId: graph.facilityId,
+              snapshotType: "INTEREST_CALCULATION",
+              idempotencyKey: randomUUID(),
+              requestFingerprint: "ABC".padEnd(64, "a"),
+              interestCalculationId: calculation.id,
+            },
+          }),
+        (error: unknown) => error instanceof Error && /requestFingerprint_check/.test(error.message),
+      );
+
+      await assert.rejects(
+        () =>
+          prisma.financialSnapshotRequest.create({
+            data: {
+              loanFacilityId: graph.facilityId,
+              snapshotType: "INTEREST_CALCULATION",
+              idempotencyKey: randomUUID(),
+              requestFingerprint: "b".repeat(64),
+              interestCalculationId: calculation.id,
+              repaymentScheduleId: schedule.id,
+            },
+          }),
+        (error: unknown) => error instanceof Error && /snapshot_target_check/.test(error.message),
+      );
+
+      await assert.rejects(
+        () =>
+          prisma.financialSnapshotRequest.create({
+            data: {
+              loanFacilityId: graph.facilityId,
+              snapshotType: "REPAYMENT_SCHEDULE",
+              idempotencyKey: randomUUID(),
+              requestFingerprint: "c".repeat(64),
+              interestCalculationId: calculation.id,
+            },
+          }),
+        (error: unknown) => error instanceof Error && /snapshot_target_check/.test(error.message),
+      );
+
+      await assert.rejects(
+        () =>
+          prisma.financialSnapshotRequest.create({
+            data: {
+              loanFacilityId: graph.facilityId,
+              snapshotType: "INTEREST_CALCULATION",
+              idempotencyKey: randomUUID(),
+              requestFingerprint: "d".repeat(64),
+            },
+          }),
+        (error: unknown) => error instanceof Error && /snapshot_target_check/.test(error.message),
+      );
+
+      await assert.rejects(
+        () =>
+          prisma.financialSnapshotRequest.create({
+            data: {
+              loanFacilityId: graph.facilityId,
+              snapshotType: "INTEREST_CALCULATION",
+              idempotencyKey: randomUUID(),
+              requestFingerprint: "e".repeat(64),
+              interestCalculationId: foreign.id,
+            },
+          }),
+        (error: unknown) => error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2003",
+      );
+
+      const stored = await prisma.interestCalculation.findUniqueOrThrow({ where: { id: calculation.id } });
+      await assert.rejects(
+        () =>
+          prisma.interestCalculation.create({
+            data: {
+              loanFacilityId: stored.loanFacilityId,
+              productVersionId: stored.productVersionId,
+              historySequence: stored.historySequence,
+              calculationStrategy: stored.calculationStrategy,
+              principalAmount: stored.principalAmount,
+              annualRate: stored.annualRate,
+              annualInterestAmount: stored.annualInterestAmount,
+              allocationFrequency: stored.allocationFrequency,
+              recalculationFrequency: stored.recalculationFrequency,
+              inputSnapshot: stored.inputSnapshot ?? {},
+              policySnapshot: stored.policySnapshot ?? {},
+              resultSnapshot: stored.resultSnapshot ?? {},
+            },
+          }),
+        (error: unknown) => error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002",
+      );
+
+      const storedSchedule = await prisma.repaymentSchedule.findUniqueOrThrow({ where: { id: schedule.id } });
+      await assert.rejects(
+        () =>
+          prisma.repaymentSchedule.create({
+            data: {
+              loanFacilityId: storedSchedule.loanFacilityId,
+              productVersionId: storedSchedule.productVersionId,
+              historySequence: storedSchedule.historySequence,
+              principalAmount: storedSchedule.principalAmount,
+              totalScheduledPrincipal: storedSchedule.totalScheduledPrincipal,
+              totalScheduledInterest: storedSchedule.totalScheduledInterest,
+              totalScheduledAmount: storedSchedule.totalScheduledAmount,
+              remainingPrincipal: storedSchedule.remainingPrincipal,
+              numberOfInstalments: storedSchedule.numberOfInstalments,
+              inputSnapshot: storedSchedule.inputSnapshot ?? {},
+              policySnapshot: storedSchedule.policySnapshot ?? {},
+              resultSnapshot: storedSchedule.resultSnapshot ?? {},
+            },
+          }),
+        (error: unknown) => error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002",
+      );
+
+      assert.equal(await prisma.interestCalculation.count({ where: { loanFacilityId: graph.facilityId } }), 1);
+      assert.equal(await prisma.repaymentSchedule.count({ where: { loanFacilityId: graph.facilityId } }), 1);
+      assert.equal(await prisma.financialSnapshotRequest.count({ where: { loanFacilityId: graph.facilityId } }), 2);
+      assert.equal(await prisma.interestCalculation.count({ where: { loanFacilityId: other.facilityId } }), 1);
+    } finally {
+      await destroyGraph(graph);
+      await destroyGraph(other);
     }
   });
 });
