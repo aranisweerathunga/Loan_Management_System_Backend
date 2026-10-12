@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { after, describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
 import { productVersionConfigurationSchema } from "../src/modules/interest-repayment/configuration.js";
 import {
   createVersionSchema,
@@ -8,6 +8,7 @@ import {
 import * as productService from "../src/modules/products/product.service.js";
 import { AppError } from "../src/shared/errors/app-error.js";
 import { disconnectDatabase, prisma } from "../src/shared/database/prisma.js";
+import { requireTestDatabase } from "./require-test-database.js";
 
 const phase8Configuration = {
   eligibility: { rules: [] },
@@ -22,6 +23,10 @@ const phase8Configuration = {
     paymentAllocationPriority: ["PRINCIPAL", "INTEREST"],
   },
 };
+
+before(async () => {
+  await requireTestDatabase();
+});
 
 after(async () => {
   await disconnectDatabase();

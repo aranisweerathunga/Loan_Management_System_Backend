@@ -4,6 +4,7 @@ import { Prisma } from "../src/generated/prisma/client.js";
 import { calculateInterest } from "../src/modules/interest-repayment/interest-engine.js";
 import { assembleRepaymentSchedule } from "../src/modules/interest-repayment/repayment-schedule-engine.js";
 import { disconnectDatabase, prisma } from "../src/shared/database/prisma.js";
+import { requireTestDatabase } from "./require-test-database.js";
 
 type GraphIds = {
   categoryId?: string;
@@ -18,6 +19,7 @@ type SequenceRow = { calendarYear: number; lastValue: number };
 
 let facilitySequencesBefore: SequenceRow[] = [];
 let applicationSequencesBefore: SequenceRow[] = [];
+let databaseReady = false;
 
 function asJson(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
@@ -123,16 +125,20 @@ async function createGraph(): Promise<Required<GraphIds>> {
   }
 }
 
+async function hasAppendOnlyHistory(facilityId: string): Promise<boolean> {
+  const [calculations, schedules, requests] = await Promise.all([
+    prisma.interestCalculation.count({ where: { loanFacilityId: facilityId } }),
+    prisma.repaymentSchedule.count({ where: { loanFacilityId: facilityId } }),
+    prisma.financialSnapshotRequest.count({ where: { loanFacilityId: facilityId } }),
+  ]);
+  return calculations > 0 || schedules > 0 || requests > 0;
+}
+
 async function destroyGraph(ids: GraphIds): Promise<void> {
+  if (ids.facilityId && (await hasAppendOnlyHistory(ids.facilityId))) {
+    return;
+  }
   if (ids.facilityId) {
-    await prisma.repaymentScheduleEntry.deleteMany({
-      where: { repaymentSchedule: { loanFacilityId: ids.facilityId } },
-    });
-    await prisma.repaymentSchedule.deleteMany({ where: { loanFacilityId: ids.facilityId } });
-    await prisma.interestAllocation.deleteMany({
-      where: { interestCalculation: { loanFacilityId: ids.facilityId } },
-    });
-    await prisma.interestCalculation.deleteMany({ where: { loanFacilityId: ids.facilityId } });
     await prisma.loanFacility.delete({ where: { id: ids.facilityId } });
   }
   if (ids.applicationId) {
@@ -153,16 +159,22 @@ async function destroyGraph(ids: GraphIds): Promise<void> {
 }
 
 before(async () => {
+  await requireTestDatabase();
   const sequences = await readSequences();
   facilitySequencesBefore = sequences.facilities;
   applicationSequencesBefore = sequences.applications;
+  databaseReady = true;
 });
 
 after(async () => {
-  const sequences = await readSequences();
-  assert.deepEqual(sequences.facilities, facilitySequencesBefore);
-  assert.deepEqual(sequences.applications, applicationSequencesBefore);
-  await disconnectDatabase();
+  try {
+    if (!databaseReady) return;
+    const sequences = await readSequences();
+    assert.deepEqual(sequences.facilities, facilitySequencesBefore);
+    assert.deepEqual(sequences.applications, applicationSequencesBefore);
+  } finally {
+    await disconnectDatabase();
+  }
 });
 
 describe("interest and repayment persistence", () => {

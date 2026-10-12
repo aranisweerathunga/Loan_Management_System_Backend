@@ -405,7 +405,7 @@ model InterestAllocation {
   sequence              Int
   interestAmount        Decimal             @db.Decimal(18, 2)
   createdAt             DateTime            @default(now())
-  interestCalculation   InterestCalculation @relation(fields: [interestCalculationId], references: [id], onDelete: Restrict)
+  interestCalculation   InterestCalculation @relation(fields: [interestCalculationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@unique([interestCalculationId, sequence])
   @@index([interestCalculationId])
@@ -457,7 +457,7 @@ model RepaymentScheduleEntry {
   totalScheduledAmount  Decimal           @db.Decimal(18, 2)
   closingPrincipal      Decimal           @db.Decimal(18, 2)
   createdAt             DateTime          @default(now())
-  repaymentSchedule     RepaymentSchedule @relation(fields: [repaymentScheduleId], references: [id], onDelete: Restrict)
+  repaymentSchedule     RepaymentSchedule @relation(fields: [repaymentScheduleId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   @@unique([repaymentScheduleId, sequence])
   @@index([repaymentScheduleId])

@@ -10,6 +10,7 @@ import {
 } from "../src/modules/interest-repayment/snapshot-writer.js";
 import { AppError } from "../src/shared/errors/app-error.js";
 import { disconnectDatabase, prisma } from "../src/shared/database/prisma.js";
+import { requireTestDatabase } from "./require-test-database.js";
 
 type GraphIds = {
   categoryId?: string;
@@ -36,6 +37,7 @@ const repaymentPolicy = {
 
 let facilitySequencesBefore: SequenceRow[] = [];
 let applicationSequencesBefore: SequenceRow[] = [];
+let databaseReady = false;
 
 function utcDate(isoDate: string): Date {
   return new Date(`${isoDate}T00:00:00.000Z`);
@@ -65,17 +67,20 @@ function persistSchedule(input: unknown) {
   return persistRepaymentScheduleSnapshot(input, randomUUID());
 }
 
+async function hasAppendOnlyHistory(facilityId: string): Promise<boolean> {
+  const [calculations, schedules, requests] = await Promise.all([
+    prisma.interestCalculation.count({ where: { loanFacilityId: facilityId } }),
+    prisma.repaymentSchedule.count({ where: { loanFacilityId: facilityId } }),
+    prisma.financialSnapshotRequest.count({ where: { loanFacilityId: facilityId } }),
+  ]);
+  return calculations > 0 || schedules > 0 || requests > 0;
+}
+
 async function destroyGraph(ids: GraphIds): Promise<void> {
+  if (ids.facilityId && (await hasAppendOnlyHistory(ids.facilityId))) {
+    return;
+  }
   if (ids.facilityId) {
-    await prisma.financialSnapshotRequest.deleteMany({ where: { loanFacilityId: ids.facilityId } });
-    await prisma.repaymentScheduleEntry.deleteMany({
-      where: { repaymentSchedule: { loanFacilityId: ids.facilityId } },
-    });
-    await prisma.repaymentSchedule.deleteMany({ where: { loanFacilityId: ids.facilityId } });
-    await prisma.interestAllocation.deleteMany({
-      where: { interestCalculation: { loanFacilityId: ids.facilityId } },
-    });
-    await prisma.interestCalculation.deleteMany({ where: { loanFacilityId: ids.facilityId } });
     await prisma.loanFacility.delete({ where: { id: ids.facilityId } });
   }
   if (ids.applicationId) {
@@ -254,18 +259,22 @@ function isConflict(error: unknown): boolean {
 }
 
 before(async () => {
-  const databases = await prisma.$queryRaw<Array<{ name: string }>>`SELECT current_database() AS name`;
-  assert.equal(databases[0]?.name, "loan_management_db");
+  await requireTestDatabase();
   const sequences = await readSequences();
   facilitySequencesBefore = sequences.facilities;
   applicationSequencesBefore = sequences.applications;
+  databaseReady = true;
 });
 
 after(async () => {
-  const sequences = await readSequences();
-  assert.deepEqual(sequences.facilities, facilitySequencesBefore);
-  assert.deepEqual(sequences.applications, applicationSequencesBefore);
-  await disconnectDatabase();
+  try {
+    if (!databaseReady) return;
+    const sequences = await readSequences();
+    assert.deepEqual(sequences.facilities, facilitySequencesBefore);
+    assert.deepEqual(sequences.applications, applicationSequencesBefore);
+  } finally {
+    await disconnectDatabase();
+  }
 });
 
 describe("internal financial snapshot writer", () => {
