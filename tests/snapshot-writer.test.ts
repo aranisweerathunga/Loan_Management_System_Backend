@@ -57,8 +57,17 @@ async function readSequences(): Promise<{ facilities: SequenceRow[]; application
   return { facilities, applications };
 }
 
+function persistCalculation(input: unknown) {
+  return persistInterestCalculationSnapshot(input, randomUUID());
+}
+
+function persistSchedule(input: unknown) {
+  return persistRepaymentScheduleSnapshot(input, randomUUID());
+}
+
 async function destroyGraph(ids: GraphIds): Promise<void> {
   if (ids.facilityId) {
+    await prisma.financialSnapshotRequest.deleteMany({ where: { loanFacilityId: ids.facilityId } });
     await prisma.repaymentScheduleEntry.deleteMany({
       where: { repaymentSchedule: { loanFacilityId: ids.facilityId } },
     });
@@ -244,7 +253,7 @@ describe("internal financial snapshot writer", () => {
     const graph = await createGraph();
     const transactionsBefore = await prisma.loanTransaction.count();
     try {
-      const first = await persistInterestCalculationSnapshot(calculationPayload(graph, "1000000.00"));
+      const first = await persistCalculation(calculationPayload(graph, "1000000.00"));
       assert.equal(first.historySequence, 1);
       assert.equal(first.annualInterestAmount, "100000.00");
       assert.equal(first.allocations[0]?.interestAmount, "8333.34");
@@ -258,7 +267,7 @@ describe("internal financial snapshot writer", () => {
       assert.equal(stored.productVersionId, graph.versionId);
       assert.equal(money(stored.allocations[0]?.interestAmount ?? "0"), "8333.34");
 
-      const second = await persistInterestCalculationSnapshot(calculationPayload(graph, "250000.00"));
+      const second = await persistCalculation(calculationPayload(graph, "250000.00"));
       assert.equal(second.historySequence, 2);
       const original = await prisma.interestCalculation.findUniqueOrThrow({ where: { id: first.id } });
       assert.equal(original.historySequence, 1);
@@ -273,8 +282,8 @@ describe("internal financial snapshot writer", () => {
   it("persists a full schedule and a partial schedule on an independent sequence", async () => {
     const graph = await createGraph();
     try {
-      const calculation = await persistInterestCalculationSnapshot(calculationPayload(graph, "100.00"));
-      const full = await persistRepaymentScheduleSnapshot(
+      const calculation = await persistCalculation(calculationPayload(graph, "100.00"));
+      const full = await persistSchedule(
         schedulePayload(graph, fullSchedule, calculation.id),
       );
       assert.equal(full.historySequence, 1);
@@ -282,7 +291,7 @@ describe("internal financial snapshot writer", () => {
       assert.equal(full.remainingPrincipal, "0.00");
       assert.equal(full.interestCalculationId, calculation.id);
 
-      const partial = await persistRepaymentScheduleSnapshot(schedulePayload(graph, partialSchedule));
+      const partial = await persistSchedule(schedulePayload(graph, partialSchedule));
       assert.equal(partial.historySequence, 2);
       assert.equal(partial.remainingPrincipal, "940000.00");
       assert.equal(partial.interestCalculationId, null);
@@ -304,7 +313,7 @@ describe("internal financial snapshot writer", () => {
         interestPolicy: { ...interestPolicy, annualRate: "12.0000" },
       };
       await assert.rejects(
-        () => persistInterestCalculationSnapshot(payload),
+        () => persistCalculation(payload),
         (error: unknown) => {
           assert.ok(error instanceof AppError);
           assert.equal(error.statusCode, 409);
@@ -336,7 +345,7 @@ describe("internal financial snapshot writer", () => {
       const payload = calculationPayload(graph, "1000000.00");
       payload.productVersionId = otherVersionId;
       await assert.rejects(
-        () => persistInterestCalculationSnapshot(payload),
+        () => persistCalculation(payload),
         (error: unknown) => {
           assert.ok(error instanceof AppError);
           assert.equal(error.statusCode, 409);
@@ -360,7 +369,7 @@ describe("internal financial snapshot writer", () => {
     try {
       const payload = calculationPayload(graph, "1000000.00");
       await assert.rejects(
-        () => persistInterestCalculationSnapshot({ ...payload, historySequence: 1 }),
+        () => persistCalculation({ ...payload, historySequence: 1 }),
         (error: unknown) => {
           assert.ok(error instanceof AppError);
           assert.equal(error.statusCode, 400);
@@ -369,11 +378,11 @@ describe("internal financial snapshot writer", () => {
         },
       );
 
-      const foreignCalculation = await persistInterestCalculationSnapshot(calculationPayload(other, "100.00"));
+      const foreignCalculation = await persistCalculation(calculationPayload(other, "100.00"));
       const before = await prisma.interestCalculation.findUniqueOrThrow({ where: { id: foreignCalculation.id } });
       await assert.rejects(
         () =>
-          persistRepaymentScheduleSnapshot(
+          persistSchedule(
             schedulePayload(graph, fullSchedule, foreignCalculation.id),
           ),
         (error: unknown) => {
@@ -397,7 +406,7 @@ describe("internal financial snapshot writer", () => {
   it("rejects a missing facility and malformed payloads without inserting a snapshot", async () => {
     const missingId = randomUUID();
     await assert.rejects(
-      () => persistInterestCalculationSnapshot({ loanFacilityId: missingId, productVersionId: randomUUID() }),
+      () => persistCalculation({ loanFacilityId: missingId, productVersionId: randomUUID() }),
       (error: unknown) => {
         assert.ok(error instanceof AppError);
         assert.equal(error.statusCode, 404);
@@ -410,7 +419,7 @@ describe("internal financial snapshot writer", () => {
     const graph = await createGraph();
     try {
       await assert.rejects(
-        () => persistInterestCalculationSnapshot(null),
+        () => persistCalculation(null),
         (error: unknown) => {
           assert.ok(error instanceof AppError);
           assert.equal(error.statusCode, 400);
@@ -419,7 +428,7 @@ describe("internal financial snapshot writer", () => {
         },
       );
       await assert.rejects(
-        () => persistRepaymentScheduleSnapshot({ loanFacilityId: " ", productVersionId: graph.versionId }),
+        () => persistSchedule({ loanFacilityId: " ", productVersionId: graph.versionId }),
         (error: unknown) => {
           assert.ok(error instanceof AppError);
           assert.equal(error.statusCode, 400);
@@ -440,7 +449,7 @@ describe("internal financial snapshot writer", () => {
       const calculation = calculationPayload(graph, "1000000.00");
       calculation.policySnapshot = { repaymentPolicy };
       await assert.rejects(
-        () => persistInterestCalculationSnapshot(calculation),
+        () => persistCalculation(calculation),
         (error: unknown) => {
           assert.ok(error instanceof AppError);
           assert.equal(error.statusCode, 409);
@@ -452,7 +461,7 @@ describe("internal financial snapshot writer", () => {
       const unexpected = calculationPayload(graph, "1000000.00");
       unexpected.policySnapshot = { interestPolicy, paymentVariancePolicy: {} };
       await assert.rejects(
-        () => persistInterestCalculationSnapshot(unexpected),
+        () => persistCalculation(unexpected),
         (error: unknown) => {
           assert.ok(error instanceof AppError);
           assert.equal(error.statusCode, 409);
@@ -467,7 +476,7 @@ describe("internal financial snapshot writer", () => {
         repaymentPolicy: { paymentAllocationPriority: ["PRINCIPAL", "INTEREST"] },
       };
       await assert.rejects(
-        () => persistRepaymentScheduleSnapshot(substituted),
+        () => persistSchedule(substituted),
         (error: unknown) => {
           assert.ok(error instanceof AppError);
           assert.equal(error.statusCode, 409);
@@ -479,7 +488,7 @@ describe("internal financial snapshot writer", () => {
       const incomplete = schedulePayload(graph, fullSchedule);
       incomplete.policySnapshot = { interestPolicy };
       await assert.rejects(
-        () => persistRepaymentScheduleSnapshot(incomplete),
+        () => persistSchedule(incomplete),
         (error: unknown) => {
           assert.ok(error instanceof AppError);
           assert.equal(error.statusCode, 409);
@@ -498,13 +507,13 @@ describe("internal financial snapshot writer", () => {
   it("leaves an earlier snapshot unchanged when a later calculation is rejected", async () => {
     const graph = await createGraph();
     try {
-      const original = await persistInterestCalculationSnapshot(calculationPayload(graph, "1000000.00"));
+      const original = await persistCalculation(calculationPayload(graph, "1000000.00"));
       const invalid = calculationPayload(graph, "1000000.00");
       invalid.allocations = invalid.allocations.map((allocation, index) =>
         index === 0 ? { ...allocation, interestAmount: "0.00" } : allocation,
       );
       await assert.rejects(
-        () => persistInterestCalculationSnapshot(invalid),
+        () => persistCalculation(invalid),
         (error: unknown) => {
           assert.ok(error instanceof AppError);
           assert.equal(error.statusCode, 400);
@@ -530,8 +539,8 @@ describe("internal financial snapshot writer", () => {
     const schedules = await createGraph();
     try {
       const calculationResults = await Promise.all([
-        persistInterestCalculationSnapshot(calculationPayload(calculations, "1000000.00")),
-        persistInterestCalculationSnapshot(calculationPayload(calculations, "250000.00")),
+        persistCalculation(calculationPayload(calculations, "1000000.00")),
+        persistCalculation(calculationPayload(calculations, "250000.00")),
       ]);
       assert.deepEqual(
         calculationResults.map((result) => result.historySequence).sort((left, right) => left - right),
@@ -551,8 +560,8 @@ describe("internal financial snapshot writer", () => {
       );
 
       const scheduleResults = await Promise.all([
-        persistRepaymentScheduleSnapshot(schedulePayload(schedules, fullSchedule)),
-        persistRepaymentScheduleSnapshot(schedulePayload(schedules, partialSchedule)),
+        persistSchedule(schedulePayload(schedules, fullSchedule)),
+        persistSchedule(schedulePayload(schedules, partialSchedule)),
       ]);
       assert.deepEqual(
         scheduleResults.map((result) => result.historySequence).sort((left, right) => left - right),
@@ -573,6 +582,137 @@ describe("internal financial snapshot writer", () => {
     } finally {
       await destroyGraph(calculations);
       await destroyGraph(schedules);
+    }
+  });
+
+  it("replays an identical key and rejects a conflicting payload", async () => {
+    const graph = await createGraph();
+    const key = randomUUID().toUpperCase();
+    try {
+      const payload = calculationPayload(graph, "1000000.00");
+      const first = await persistInterestCalculationSnapshot(payload, key);
+      const replay = await persistInterestCalculationSnapshot(
+        { ...payload, policySnapshot: { interestPolicy: { ...interestPolicy } } },
+        key.toLowerCase(),
+      );
+      assert.deepEqual(replay, first);
+      assert.equal(await prisma.interestCalculation.count({ where: { loanFacilityId: graph.facilityId } }), 1);
+      assert.equal(
+        await prisma.financialSnapshotRequest.count({
+          where: { loanFacilityId: graph.facilityId, snapshotType: "INTEREST_CALCULATION" },
+        }),
+        1,
+      );
+
+      const scheduleKey = randomUUID();
+      const schedule = await persistRepaymentScheduleSnapshot(schedulePayload(graph, fullSchedule, first.id), scheduleKey);
+      const scheduleReplay = await persistRepaymentScheduleSnapshot(
+        schedulePayload(graph, fullSchedule, first.id),
+        scheduleKey,
+      );
+      assert.deepEqual(scheduleReplay, schedule);
+      assert.equal(scheduleReplay.historySequence, 1);
+
+      await assert.rejects(
+        () => persistInterestCalculationSnapshot(calculationPayload(graph, "250000.00"), key),
+        (error: unknown) => {
+          assert.ok(error instanceof AppError);
+          assert.equal(error.statusCode, 409);
+          assert.equal(error.code, "CONFLICT");
+          assert.match(error.message, /different snapshot/);
+          return true;
+        },
+      );
+      assert.equal(await prisma.interestCalculation.count({ where: { loanFacilityId: graph.facilityId } }), 1);
+      const stored = await prisma.interestCalculation.findUniqueOrThrow({ where: { id: first.id } });
+      assert.equal(stored.historySequence, 1);
+      assert.equal(money(stored.principalAmount), "1000000.00");
+    } finally {
+      await destroyGraph(graph);
+    }
+  });
+
+  it("does not consume an idempotency key when validation fails", async () => {
+    const graph = await createGraph();
+    const key = randomUUID();
+    try {
+      const invalid = calculationPayload(graph, "1000000.00");
+      invalid.allocations = invalid.allocations.map((allocation, index) =>
+        index === 0 ? { ...allocation, interestAmount: "0.00" } : allocation,
+      );
+      await assert.rejects(
+        () => persistInterestCalculationSnapshot(invalid, key),
+        (error: unknown) => error instanceof AppError && error.statusCode === 400,
+      );
+      assert.equal(
+        await prisma.financialSnapshotRequest.count({ where: { loanFacilityId: graph.facilityId } }),
+        0,
+      );
+
+      const saved = await persistInterestCalculationSnapshot(calculationPayload(graph, "1000000.00"), key);
+      assert.equal(saved.historySequence, 1);
+      assert.equal(saved.annualRate, "10.0000");
+      assert.equal(await prisma.interestCalculation.count({ where: { loanFacilityId: graph.facilityId } }), 1);
+    } finally {
+      await destroyGraph(graph);
+    }
+  });
+
+  it("serializes concurrent identical and conflicting keys", async () => {
+    const graph = await createGraph();
+    const identicalKey = randomUUID();
+    const conflictingKey = randomUUID();
+    try {
+      const payload = calculationPayload(graph, "1000000.00");
+      const identical = await Promise.all([
+        persistInterestCalculationSnapshot(payload, identicalKey),
+        persistInterestCalculationSnapshot(payload, identicalKey),
+      ]);
+      assert.deepEqual(identical[0], identical[1]);
+      assert.equal(identical[0]?.historySequence, 1);
+
+      const settled = await Promise.allSettled([
+        persistInterestCalculationSnapshot(calculationPayload(graph, "1000000.00"), conflictingKey),
+        persistInterestCalculationSnapshot(calculationPayload(graph, "250000.00"), conflictingKey),
+      ]);
+      const fulfilled = settled.filter((result) => result.status === "fulfilled");
+      const rejected = settled.filter((result) => result.status === "rejected");
+      assert.equal(fulfilled.length, 1);
+      assert.equal(rejected.length, 1);
+      const failure = rejected[0];
+      assert.ok(failure?.status === "rejected" && failure.reason instanceof AppError);
+      assert.equal(failure.reason.statusCode, 409);
+      assert.equal(failure.reason.code, "CONFLICT");
+
+      assert.equal(await prisma.interestCalculation.count({ where: { loanFacilityId: graph.facilityId } }), 2);
+      assert.equal(
+        await prisma.financialSnapshotRequest.count({ where: { loanFacilityId: graph.facilityId } }),
+        2,
+      );
+    } finally {
+      await destroyGraph(graph);
+    }
+  });
+
+  it("rejects a malformed idempotency key before inserting a snapshot", async () => {
+    const graph = await createGraph();
+    try {
+      await assert.rejects(
+        () => persistInterestCalculationSnapshot(calculationPayload(graph, "100.00"), "not-a-uuid"),
+        (error: unknown) => {
+          assert.ok(error instanceof AppError);
+          assert.equal(error.statusCode, 400);
+          assert.match(error.message, /idempotencyKey must be a UUID/);
+          return true;
+        },
+      );
+      assert.equal(await prisma.interestCalculation.count({ where: { loanFacilityId: graph.facilityId } }), 0);
+      assert.equal(
+        await prisma.financialSnapshotRequest.count({ where: { loanFacilityId: graph.facilityId } }),
+        0,
+      );
+    } finally {
+      await destroyGraph(graph);
     }
   });
 });

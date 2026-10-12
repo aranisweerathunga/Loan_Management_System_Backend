@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Prisma } from "../../generated/prisma/client.js";
 import { prisma } from "../../shared/database/prisma.js";
 import { AppError } from "../../shared/errors/app-error.js";
@@ -11,8 +12,9 @@ import {
 /**
  * Internal persistence for an already supplied financial snapshot.
  *
- * Successful retries are not idempotent. Calling either function again inserts
- * another history row. Do not expose these functions through an HTTP route.
+ * The caller supplies an idempotency key. The same key and financial payload
+ * return the original snapshot. The same key with a different payload is a
+ * conflict. Do not expose these functions through an HTTP route.
  *
  * This module does not make snapshot rows immutable. Database grants and
  * application code can still update or delete them until a later safeguard.
@@ -23,6 +25,7 @@ import {
 
 const TRANSACTION_OPTIONS = { maxWait: 15_000, timeout: 15_000 } as const;
 const POLICY_SECTIONS = ["interestPolicy", "repaymentPolicy"] as const;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 type PolicySection = (typeof POLICY_SECTIONS)[number];
 
@@ -107,6 +110,102 @@ function requireIdentifier(value: unknown, field: string): string {
     throw validationError(`${field} must be a non-empty string`);
   }
   return value;
+}
+
+function requireIdempotencyKey(value: string): string {
+  if (typeof value !== "string") {
+    throw validationError("idempotencyKey must be a UUID");
+  }
+  const normalized = value.toLowerCase();
+  if (!UUID_PATTERN.test(normalized)) {
+    throw validationError("idempotencyKey must be a UUID");
+  }
+  return normalized;
+}
+
+function replayError(field: string): AppError {
+  return new AppError(500, `Stored ${field} cannot be replayed`, "INTERNAL_SERVER_ERROR");
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => (item === undefined ? "null" : canonicalJson(item))).join(",")}]`;
+  }
+  if (isRecord(value)) {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw validationError("financial payload must contain only JSON values");
+    }
+    const keys = Object.keys(value)
+      .filter((key) => value[key] !== undefined)
+      .sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  if (typeof value === "string" || typeof value === "boolean" || value === null) {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw validationError("financial payload must not contain non-finite numbers");
+    }
+    return JSON.stringify(value);
+  }
+  throw validationError("financial payload must contain only JSON values");
+}
+
+/**
+ * The digest covers the caller payload. Decimal strings are hashed as text.
+ * historySequence and an embedded idempotency key are not financial content.
+ */
+function fingerprintPayload(payload: Record<string, unknown>): string {
+  const financial: Record<string, unknown> = {};
+  for (const key of Object.keys(payload)) {
+    if (key === "historySequence" || key === "idempotencyKey") {
+      continue;
+    }
+    financial[key] = payload[key];
+  }
+  return createHash("sha256").update(canonicalJson(financial), "utf8").digest("hex");
+}
+
+function storedRecord(value: unknown, field: string): Record<string, unknown> {
+  if (!isRecord(value)) {
+    throw replayError(field);
+  }
+  return value;
+}
+
+function storedString(record: Record<string, unknown>, key: string, field: string): string {
+  const value = record[key];
+  if (typeof value !== "string") {
+    throw replayError(field);
+  }
+  return value;
+}
+
+function storedNullableString(record: Record<string, unknown>, key: string, field: string): string | null {
+  const value = record[key];
+  if (value === null) {
+    return null;
+  }
+  if (typeof value !== "string") {
+    throw replayError(field);
+  }
+  return value;
+}
+
+function storedInteger(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw replayError(field);
+  }
+  return value;
+}
+
+function storedLiteral<T extends string>(value: string, expected: T, field: string): T {
+  if (value !== expected) {
+    throw replayError(field);
+  }
+  return expected;
 }
 
 function jsonValue(value: unknown): Prisma.InputJsonValue {
@@ -261,12 +360,161 @@ async function nextScheduleSequence(tx: Prisma.TransactionClient, loanFacilityId
   return nextSequence(rows[0]?.maxSequence);
 }
 
-export async function persistInterestCalculationSnapshot(input: unknown): Promise<PersistedInterestCalculation> {
+function conflictError(): AppError {
+  return new AppError(409, "idempotency key was already used for a different snapshot", "CONFLICT");
+}
+
+async function replayInterestCalculation(
+  tx: Prisma.TransactionClient,
+  interestCalculationId: string,
+): Promise<PersistedInterestCalculation> {
+  const stored = await tx.interestCalculation.findUnique({
+    where: { id: interestCalculationId },
+    include: { allocations: { orderBy: { sequence: "asc" } } },
+  });
+  if (!stored) {
+    throw replayError("interest calculation");
+  }
+  const result = storedRecord(stored.resultSnapshot, "interest result snapshot");
+  const input = storedRecord(stored.inputSnapshot, "interest input snapshot");
+  const resultAllocations = result.allocations;
+  if (!Array.isArray(resultAllocations)) {
+    throw replayError("interest allocations");
+  }
+  const amounts = new Map<number, string>();
+  for (const allocation of resultAllocations) {
+    const row = storedRecord(allocation, "interest allocation");
+    amounts.set(
+      storedInteger(row.sequence, "interest allocation sequence"),
+      storedString(row, "interestAmount", "interest allocation amount"),
+    );
+  }
+  if (amounts.size !== stored.allocations.length || amounts.size !== resultAllocations.length) {
+    throw replayError("interest allocations");
+  }
+  return {
+    id: stored.id,
+    loanFacilityId: stored.loanFacilityId,
+    productVersionId: stored.productVersionId,
+    historySequence: stored.historySequence,
+    calculationStrategy: storedLiteral(
+      storedString(result, "calculationStrategy", "calculation strategy"),
+      "ANNUAL_INTEREST_ALLOCATION",
+      "calculation strategy",
+    ),
+    principalAmount: storedString(result, "principalAmount", "principal amount"),
+    annualRate: storedString(result, "annualRate", "annual rate"),
+    annualInterestAmount: storedString(result, "annualInterestAmount", "annual interest amount"),
+    allocationFrequency: storedLiteral(
+      storedString(result, "allocationFrequency", "allocation frequency"),
+      "MONTHLY",
+      "allocation frequency",
+    ),
+    recalculationFrequency: storedLiteral(
+      storedString(result, "recalculationFrequency", "recalculation frequency"),
+      "ANNUAL",
+      "recalculation frequency",
+    ),
+    periodStart: storedNullableString(input, "periodStart", "period start"),
+    periodEnd: storedNullableString(input, "periodEnd", "period end"),
+    allocations: stored.allocations.map((allocation) => {
+      const interestAmount = amounts.get(allocation.sequence);
+      if (interestAmount === undefined) {
+        throw replayError("interest allocation");
+      }
+      return {
+        id: allocation.id,
+        sequence: allocation.sequence,
+        interestAmount,
+      };
+    }),
+  };
+}
+
+async function replayRepaymentSchedule(
+  tx: Prisma.TransactionClient,
+  repaymentScheduleId: string,
+): Promise<PersistedRepaymentSchedule> {
+  const stored = await tx.repaymentSchedule.findUnique({
+    where: { id: repaymentScheduleId },
+    include: { entries: { orderBy: { sequence: "asc" } } },
+  });
+  if (!stored) {
+    throw replayError("repayment schedule");
+  }
+  const result = storedRecord(stored.resultSnapshot, "schedule result snapshot");
+  const resultEntries = result.entries;
+  if (!Array.isArray(resultEntries)) {
+    throw replayError("schedule entries");
+  }
+  const entriesBySequence = new Map<number, Record<string, unknown>>();
+  for (const entry of resultEntries) {
+    const row = storedRecord(entry, "schedule entry");
+    entriesBySequence.set(storedInteger(row.sequence, "schedule entry sequence"), row);
+  }
+  if (entriesBySequence.size !== stored.entries.length || entriesBySequence.size !== resultEntries.length) {
+    throw replayError("schedule entries");
+  }
+  return {
+    id: stored.id,
+    loanFacilityId: stored.loanFacilityId,
+    productVersionId: stored.productVersionId,
+    historySequence: stored.historySequence,
+    interestCalculationId: stored.interestCalculationId,
+    principalAmount: storedString(result, "principalAmount", "principal amount"),
+    totalScheduledPrincipal: storedString(result, "totalScheduledPrincipal", "scheduled principal"),
+    totalScheduledInterest: storedString(result, "totalScheduledInterest", "scheduled interest"),
+    totalScheduledAmount: storedString(result, "totalScheduledAmount", "scheduled amount"),
+    remainingPrincipal: storedString(result, "remainingPrincipal", "remaining principal"),
+    numberOfInstalments: storedInteger(result.numberOfInstalments, "number of instalments"),
+    entries: stored.entries.map((entry) => {
+      const row = entriesBySequence.get(entry.sequence);
+      if (!row) {
+        throw replayError("schedule entry");
+      }
+      return {
+        id: entry.id,
+        sequence: entry.sequence,
+        dueDate: storedString(row, "dueDate", "due date"),
+        openingPrincipal: storedString(row, "openingPrincipal", "opening principal"),
+        scheduledPrincipal: storedString(row, "scheduledPrincipal", "scheduled principal"),
+        scheduledInterest: storedString(row, "scheduledInterest", "scheduled interest"),
+        totalScheduledAmount: storedString(row, "totalScheduledAmount", "scheduled amount"),
+        closingPrincipal: storedString(row, "closingPrincipal", "closing principal"),
+      };
+    }),
+  };
+}
+
+export async function persistInterestCalculationSnapshot(
+  input: unknown,
+  idempotencyKey: string,
+): Promise<PersistedInterestCalculation> {
   const payload = requirePayload(input, "interestCalculation");
   requireIdentifier(payload.loanFacilityId, "loanFacilityId");
+  const key = requireIdempotencyKey(idempotencyKey);
+  const requestFingerprint = fingerprintPayload(payload);
 
   return prisma.$transaction(async (tx) => {
     const facility = await lockFacility(tx, payload.loanFacilityId as string);
+    const existing = await tx.financialSnapshotRequest.findUnique({
+      where: {
+        loanFacilityId_snapshotType_idempotencyKey: {
+          loanFacilityId: facility.id,
+          snapshotType: "INTEREST_CALCULATION",
+          idempotencyKey: key,
+        },
+      },
+    });
+    if (existing) {
+      if (existing.interestCalculationId === null) {
+        throw replayError("interest calculation request");
+      }
+      if (existing.requestFingerprint !== requestFingerprint) {
+        throw conflictError();
+      }
+      return replayInterestCalculation(tx, existing.interestCalculationId);
+    }
     assertBoundIdentity(payload, facility);
     const policies = await loadBoundPolicies(tx, facility);
     assertPolicyProvenance(payload.policySnapshot, policies, ["interestPolicy"]);
@@ -300,6 +548,15 @@ export async function persistInterestCalculationSnapshot(input: unknown): Promis
       },
       include: { allocations: { orderBy: { sequence: "asc" } } },
     });
+    await tx.financialSnapshotRequest.create({
+      data: {
+        loanFacilityId: facility.id,
+        snapshotType: "INTEREST_CALCULATION",
+        idempotencyKey: key,
+        requestFingerprint,
+        interestCalculationId: stored.id,
+      },
+    });
 
     return {
       id: stored.id,
@@ -329,12 +586,35 @@ export async function persistInterestCalculationSnapshot(input: unknown): Promis
   }, TRANSACTION_OPTIONS);
 }
 
-export async function persistRepaymentScheduleSnapshot(input: unknown): Promise<PersistedRepaymentSchedule> {
+export async function persistRepaymentScheduleSnapshot(
+  input: unknown,
+  idempotencyKey: string,
+): Promise<PersistedRepaymentSchedule> {
   const payload = requirePayload(input, "repaymentSchedule");
   requireIdentifier(payload.loanFacilityId, "loanFacilityId");
+  const key = requireIdempotencyKey(idempotencyKey);
+  const requestFingerprint = fingerprintPayload(payload);
 
   return prisma.$transaction(async (tx) => {
     const facility = await lockFacility(tx, payload.loanFacilityId as string);
+    const existing = await tx.financialSnapshotRequest.findUnique({
+      where: {
+        loanFacilityId_snapshotType_idempotencyKey: {
+          loanFacilityId: facility.id,
+          snapshotType: "REPAYMENT_SCHEDULE",
+          idempotencyKey: key,
+        },
+      },
+    });
+    if (existing) {
+      if (existing.repaymentScheduleId === null) {
+        throw replayError("repayment schedule request");
+      }
+      if (existing.requestFingerprint !== requestFingerprint) {
+        throw conflictError();
+      }
+      return replayRepaymentSchedule(tx, existing.repaymentScheduleId);
+    }
     assertBoundIdentity(payload, facility);
     const policies = await loadBoundPolicies(tx, facility);
     assertPolicyProvenance(payload.policySnapshot, policies, storedPolicySections(policies));
@@ -371,6 +651,15 @@ export async function persistRepaymentScheduleSnapshot(input: unknown): Promise<
         },
       },
       include: { entries: { orderBy: { sequence: "asc" } } },
+    });
+    await tx.financialSnapshotRequest.create({
+      data: {
+        loanFacilityId: facility.id,
+        snapshotType: "REPAYMENT_SCHEDULE",
+        idempotencyKey: key,
+        requestFingerprint,
+        repaymentScheduleId: stored.id,
+      },
     });
 
     return {
